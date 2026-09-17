@@ -1,0 +1,14 @@
+# P1 依赖（Python 3.11+，实际运行于 3.13）
+fastapi
+uvicorn
+sqlalchemy>=2.0
+pydantic-settings
+httpx
+alembic
+pytest
+celery
+pypdf                # 简历 PDF 文本抽取（扫描件 OCR 未含）
+python-multipart     # FastAPI 文件上传
+
+# 切换 PostgreSQL 时安装：
+# psycopg2-binary

@@ -1,0 +1,40 @@
+from __future__ import annotations
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """全局配置：环境变量 / .env 覆盖默认值。"""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # SQLite 开箱即用；生产切 PostgreSQL（需另装 psycopg2-binary）
+    database_url: str = "sqlite:///./dev.db"
+    # 空 = 不启用 Redis（限流退化为 DB 间隔守卫）
+    redis_url: str = ""
+
+    http_timeout_s: int = 30
+    ua: str = "job-direct-apply-bot/0.1 (compliant; contact: dev@example.com)"
+
+    fetch_default_interval_min: int = 360   # 海外公开 API 默认抓取间隔
+    official_site_interval_min: int = 720   # 官网兜底更保守
+    ttl_multiplier: int = 3                 # 连续 N 个采集周期未见更新 → expired
+
+    workday_max_total: int = 2000           # Workday 单站点单次搜索封顶
+    workday_max_pages: int = 100            # 翻页安全上限（20/页 × 100 = 2000）
+
+    # P2 简历解析：LLM 抽取（DeepSeek / OpenAI 兼容接口）。key 为空走规则兜底
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-chat"
+    llm_timeout_s: int = 60
+    uploads_dir: str = "./uploads"          # 简历原件存盘目录
+
+    # P2 规则匹配引擎权重（§7 一期，sum=1；反馈数据回归调参后可改）
+    match_w_skill: float = 0.5
+    match_w_city: float = 0.2
+    match_w_exp: float = 0.15
+    match_w_role: float = 0.15
+
+
+settings = Settings()
