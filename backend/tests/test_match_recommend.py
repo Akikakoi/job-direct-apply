@@ -158,7 +158,9 @@ def test_recommend_sorted_with_explain(session, client):
     assert body["total"] == 2
     assert body["items"][0]["job_id"] == good.id  # 满分项排第一
     assert body["items"][0]["score"] >= body["items"][1]["score"]
-    assert {e["key"] for e in body["items"][0]["explain"]} == {"skill", "city", "exp", "role"}
+    assert {"skill", "city", "exp", "role", "semantic"} <= {
+        e["key"] for e in body["items"][0]["explain"]
+    }  # P4：融合分后 explain 含 semantic 分量
 
 
 def test_profile_update_triggers_rematch(session, client):

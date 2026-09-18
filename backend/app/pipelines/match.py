@@ -1,6 +1,9 @@
-"""规则匹配引擎（P2 §7 一期：规则加权，可解释优先）。
+"""规则匹配引擎（P2 §7 一期 + P4 语义融合）。
 
-score = w_skill*skill_hit + w_city*city_fit + w_exp*exp_fit + w_role*role_fit
+四分项规则分：
+    rule = w_skill*skill_hit + w_city*city_fit + w_exp*exp_fit + w_role*role_fit
+融合分（§7 二期阉割版，γ*llm 留位）：
+    final = alpha * rule + beta * vec    # vec = TF-IDF 余弦（semantic.py）
 
 - skill_hit：简历技能 ∩ 职位技能 / 职位技能；两侧均为 skill_tags 标准标签
   （简历解析时已归一，见 parse.py）。任一侧为空 → 0.5 中性（无法判断不惩罚）；
@@ -11,7 +14,8 @@ score = w_skill*skill_hit + w_city*city_fit + w_exp*exp_fit + w_role*role_fit
 - role_fit：target_role 去修饰词（高级/资深/senior…）后与职位 title contains；
   命中 → 1；resume 无 target_role → 0.5 中性；否则 0。
 
-结果写入 match_scores（uq resume_id+job_id，先删后插幂等），
+结果写入 match_scores（uq resume_id+job_id，先删后插幂等）：
+rule_score=四分项规则分，vec_score=文本相似度，final_score=融合分（排序用）。
 profile 人工修正后由 API 层触发重算（§12.3 挂账销项）。
 """
 
@@ -22,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models import Job, MatchScore, Resume
+from app.pipelines.semantic import TfidfIndex, job_text, resume_query_text
 from app.services.city import city_match_variants
 
 # target_role 修饰词剥离（不参与 title 匹配）
@@ -115,8 +120,11 @@ def _role_fit(profile: dict, job: Job, explain: list[dict]) -> float:
     return score
 
 
-def compute_match(profile: dict, job: Job) -> dict:
-    """算单个职位的规则分，返回 {"score", "explain"}。"""
+def compute_match(profile: dict, job: Job, vec_score: float | None = None) -> dict:
+    """算单个职位得分；vec_score 提供时做 rule/vec 融合。
+
+    返回 {"score": 最终分, "rule": 规则分, "explain": [...]}。
+    """
     explain: list[dict] = []
     parts = [
         (settings.match_w_skill, _skill_hit(profile, job, explain)),
@@ -124,24 +132,44 @@ def compute_match(profile: dict, job: Job) -> dict:
         (settings.match_w_exp, _exp_fit(profile, job, explain)),
         (settings.match_w_role, _role_fit(profile, job, explain)),
     ]
-    score = round(sum(w * s for w, s in parts), 4)
-    return {"score": score, "explain": explain}
+    rule = round(sum(w * s for w, s in parts), 4)
+    if vec_score is None:
+        return {"score": rule, "rule": rule, "explain": explain}
+
+    explain.append({"key": "semantic", "score": vec_score, "note": "tfidf_cosine"})
+    final = round(
+        settings.match_alpha * rule + settings.match_beta * vec_score, 4
+    )
+    return {"score": final, "rule": rule, "explain": explain}
 
 
 def refresh_matches(session: Session, resume: Resume) -> int:
-    """重算该简历对全部 active 职位的规则分，先删后插（幂等）。"""
+    """重算该简历对全部 active 职位的融合分，先删后插（幂等）。
+
+    TF-IDF 索引每次重建（3470 条毫秒级），切 PG/向量模型时只换此实现。
+    """
     session.execute(delete(MatchScore).where(MatchScore.resume_id == resume.id))
     jobs = session.execute(select(Job).where(Job.status == "active")).scalars().all()
     profile = resume.profile or {}
-    rows = [
-        MatchScore(
-            resume_id=resume.id,
-            job_id=job.id,
-            rule_score=result["score"],
-            explain=result["explain"],
+
+    index = TfidfIndex().fit([job_text(j.title, j.description, j.skills) for j in jobs])
+    query_vec = index.build_query(resume_query_text(profile, resume.raw_text))
+    use_semantic = bool(query_vec)  # 简历无有效文本时退纯规则分
+
+    rows = []
+    for i, job in enumerate(jobs):
+        sim = index.similarity(i, query_vec) if use_semantic else None
+        result = compute_match(profile, job, vec_score=sim)
+        rows.append(
+            MatchScore(
+                resume_id=resume.id,
+                job_id=job.id,
+                rule_score=result["rule"],
+                vec_score=sim,
+                final_score=result["score"],
+                explain=result["explain"],
+            )
         )
-        for job, result in ((job, compute_match(profile, job)) for job in jobs)
-    ]
     session.add_all(rows)
     session.commit()
     return len(rows)

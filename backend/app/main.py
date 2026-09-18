@@ -226,7 +226,7 @@ def recommend(
         select(MatchScore, Job)
         .join(Job, MatchScore.job_id == Job.id)
         .where(MatchScore.resume_id == resume.id, Job.status == "active")
-        .order_by(MatchScore.rule_score.desc(), Job.updated_at.desc())
+        .order_by(MatchScore.final_score.desc(), MatchScore.rule_score.desc(), Job.updated_at.desc())
     )
     total = session.execute(
         select(func.count())
@@ -247,7 +247,9 @@ def recommend(
                     "skills": job.skills,
                     "source": job.source,
                     "apply_url": job.apply_url,
-                    "score": float(ms.rule_score) if ms.rule_score is not None else None,
+                    "score": float(ms.final_score) if ms.final_score is not None else float(ms.rule_score or 0),
+                    "rule_score": float(ms.rule_score) if ms.rule_score is not None else None,
+                    "vec_score": float(ms.vec_score) if ms.vec_score is not None else None,
                     "explain": ms.explain,
                 }
                 for ms, job in rows
