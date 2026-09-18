@@ -141,6 +141,52 @@ def test_job_must_exist_and_active(session, client):
     assert resp.status_code == 404
 
 
+# ---------- 半自动帮填 API ----------
+
+
+def test_autofill_404_and_terminated(session, client, monkeypatch):
+    from app.services import autofill as autofill_mod
+
+    # 不真拉浏览器
+    monkeypatch.setattr(autofill_mod, "launch_autofill_thread", lambda url: None)
+
+    assert client.post("/api/applications/9999/autofill").status_code == 404
+
+    job = _add_job(session)
+    rid = client.post("/api/applications", json={"user_id": 1, "job_id": job.id, "authorized": True}).json()["data"]["id"]
+    client.post(f"/api/applications/{rid}/status", json={"status": "closed"})
+    resp = client.post(f"/api/applications/{rid}/autofill")
+    assert resp.status_code == 400  # 已终止的投递不帮填
+
+
+def test_autofill_launches(session, client, monkeypatch):
+    from app.services import autofill as autofill_mod
+
+    called = []
+    monkeypatch.setattr(autofill_mod, "launch_autofill_thread", lambda url: called.append(url))
+
+    job = _add_job(session)
+    rid = client.post("/api/applications", json={"user_id": 1, "job_id": job.id, "authorized": True}).json()["data"]["id"]
+    resp = client.post(f"/api/applications/{rid}/autofill")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "launched"
+    assert called == [job.apply_url]
+
+
+def test_autofill_profile_not_configured():
+    from app.core import config
+    from app.services.autofill import AutofillNotConfigured, _profile
+
+    saved = (config.settings.autofill_name, config.settings.autofill_email)
+    config.settings.autofill_name = ""
+    config.settings.autofill_email = ""
+    try:
+        with pytest.raises(AutofillNotConfigured):
+            _profile()
+    finally:
+        config.settings.autofill_name, config.settings.autofill_email = saved
+
+
 # ---------- 催进扫描 ----------
 
 

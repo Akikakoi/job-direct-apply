@@ -293,6 +293,20 @@ export default function Home() {
                   <a className="link" href={a.apply_url} target="_blank" rel="noreferrer">
                     打开申请页 ↗
                   </a>
+                  {a.status !== "closed" && a.status !== "rejected" ? (
+                    <button
+                      className="ghost"
+                      style={{ padding: "3px 10px", fontSize: 12 }}
+                      onClick={async () => {
+                        setError("");
+                        const resp = await fetch(`/api/applications/${a.id}/autofill`, { method: "POST" });
+                        const body = await resp.json();
+                        if (!resp.ok) setError(body.detail || "帮填失败");
+                      }}
+                    >
+                      半自动帮填
+                    </button>
+                  ) : null}
                 </div>
               </div>
             </div>

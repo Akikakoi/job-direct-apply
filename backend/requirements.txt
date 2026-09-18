@@ -9,6 +9,7 @@ pytest
 celery
 pypdf                # 简历 PDF 文本抽取（扫描件 OCR 未含）
 python-multipart     # FastAPI 文件上传
+playwright           # 半自动帮填（装后需: playwright install chromium）
 
 # 切换 PostgreSQL 时安装：
 # psycopg2-binary

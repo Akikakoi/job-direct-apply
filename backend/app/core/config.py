@@ -39,5 +39,11 @@ class Settings(BaseSettings):
     # P3 投递催进：pending 状态卡超过 T 个自然日进入提醒（§8，T 天默认值挂账销项）
     reminder_after_days: int = 3
 
+    # P3 半自动帮填：用户投递档案（.env 配置；单用户产品形态）
+    autofill_name: str = ""
+    autofill_email: str = ""
+    autofill_phone: str = ""
+    autofill_headless: bool = False  # 有头模式：用户人工核对后手动提交
+
 
 settings = Settings()

@@ -6,19 +6,25 @@ import pytest
 
 celery = pytest.importorskip("celery")
 
-from app.workers.celery_app import celery_app, collect_company_task, collect_jobs_task
+from app.workers.celery_app import celery_app, collect_company_task, collect_jobs_task, scan_reminders_task
 
 
 def test_beat_schedule_registered():
     assert "collect-jobs-every-30min" in celery_app.conf.beat_schedule
     entry = celery_app.conf.beat_schedule["collect-jobs-every-30min"]
     assert entry["task"] == "app.workers.celery_app.collect_jobs_task"
+    # P3 催进：每日 09:00 扫描
+    assert "reminders-daily" in celery_app.conf.beat_schedule
+    assert celery_app.conf.beat_schedule["reminders-daily"]["task"] == (
+        "app.workers.celery_app.scan_reminders_task"
+    )
 
 
 def test_tasks_registered():
     names = {t for t in celery_app.tasks if not t.startswith("celery.")}
     assert "app.workers.celery_app.collect_jobs_task" in names
     assert "app.workers.celery_app.collect_company_task" in names
+    assert "app.workers.celery_app.scan_reminders_task" in names
 
 
 def test_broker_defaults_to_local_redis():

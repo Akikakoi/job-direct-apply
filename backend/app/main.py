@@ -383,3 +383,33 @@ def reminders(
     """催进扫描：submitted/under_review 卡超过 T 天（settings.reminder_after_days，默认 3）。"""
     items = scan_reminders(session, user_id=user_id)
     return {"code": 0, "data": {"total": len(items), "items": items}, "message": "ok"}
+
+
+@app.post("/api/applications/{application_id}/autofill")
+def autofill_application(
+    application_id: int, session: Session = Depends(get_session)
+) -> dict:
+    """半自动帮填：有头浏览器打开申请页并预填常见字段，由用户人工核对提交。
+
+    只填公开表单（姓名/邮箱/电话），绝不自动提交、不碰登录墙/验证码（§4/§8）。
+    """
+    from app.services.autofill import AutofillNotConfigured, launch_autofill_thread
+
+    app_row = session.get(Application, application_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="投递记录不存在")
+    if app_row.status in ("closed", "rejected"):
+        raise HTTPException(status_code=400, detail="该投递已终止，无需帮填")
+
+    apply_url = app_row.apply_url
+    if not apply_url:
+        raise HTTPException(status_code=400, detail="申请链接缺失")
+    try:
+        launch_autofill_thread(apply_url)
+    except AutofillNotConfigured as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "code": 0,
+        "data": {"application_id": application_id, "status": "launched", "apply_url": apply_url},
+        "message": "浏览器已打开，请人工核对后手动提交",
+    }
