@@ -49,5 +49,12 @@ class Settings(BaseSettings):
     autofill_phone: str = ""
     autofill_headless: bool = False  # 有头模式：用户人工核对后手动提交
 
+    # P4 催进邮件通知：smtp_host 空 = 不发邮件（beat 只打日志）
+    smtp_host: str = ""                     # 如 smtp.qq.com
+    smtp_port: int = 465                    # QQ Mail SSL
+    smtp_user: str = ""                     # 发件邮箱
+    smtp_password: str = ""                 # SMTP 授权码（非登录密码）
+    notify_email: str = ""                  # 收件邮箱（催进提醒接收方）
+
 
 settings = Settings()
