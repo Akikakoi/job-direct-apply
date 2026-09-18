@@ -38,6 +38,46 @@ COMPANY_SEED: list[dict] = [
         "fetch_policy": {"interval_min": 360},
     },
     {
+        # 2026-09-18 实测：Ashby posting-api 免鉴权单页全量（ashby 73 / elevenlabs 236 /
+        # linear 32 条），列表即带 descriptionPlain，零 N+1（见 app/adapters/ashby.py）。
+        "slug": "ashby",
+        "name": "Ashby",
+        "ats_type": "ashby",
+        "site_url": "https://jobs.ashbyhq.com/ashby",
+        "feed_url": "https://jobs.ashbyhq.com/ashby",
+        "locale": "en-US",
+        "fetch_policy": {"interval_min": 360},
+    },
+    {
+        "slug": "elevenlabs",
+        "name": "ElevenLabs",
+        "ats_type": "ashby",
+        "site_url": "https://jobs.ashbyhq.com/elevenlabs",
+        "feed_url": "https://jobs.ashbyhq.com/elevenlabs",
+        "locale": "en-US",
+        "fetch_policy": {"interval_min": 360},
+    },
+    {
+        "slug": "linear",
+        "name": "Linear",
+        "ats_type": "ashby",
+        "site_url": "https://jobs.ashbyhq.com/linear",
+        "feed_url": "https://jobs.ashbyhq.com/linear",
+        "locale": "en-US",
+        "fetch_policy": {"interval_min": 360},
+    },
+    {
+        # 2026-09-18 实测：SmartRecruiters 公开 API v1（Equinox totalFound=736），
+        # 列表无 description（详情 N+1 一期不取，见 app/adapters/smartrecruiters.py）。
+        "slug": "equinox",
+        "name": "Equinox",
+        "ats_type": "smartrecruiters",
+        "site_url": "https://jobs.smartrecruiters.com/Equinox",
+        "feed_url": "https://jobs.smartrecruiters.com/Equinox",
+        "locale": "en-US",
+        "fetch_policy": {"interval_min": 360},
+    },
+    {
         # 2026-09-16 实测：hr.163.com 公开 JSON 接口免鉴权无加密，
         # NeteaseAdapter 已落地（见 app/adapters/netease.py 模块 docstring）。
         "slug": "netease",
