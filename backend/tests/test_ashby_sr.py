@@ -92,6 +92,49 @@ def test_sr_remote_location():
     assert n.city == "Remote"
 
 
+def test_sr_detail_enrich(session, monkeypatch):
+    """开 sr_fetch_details：列表 + 详情两跳，description 由 HTML sections 剥标签而来。"""
+    from app.core import config
+
+    monkeypatch.setattr(config.settings, "sr_fetch_details", True)
+    monkeypatch.setattr(config.settings, "sr_detail_cap", 1)
+    monkeypatch.setattr("app.adapters.smartrecruiters.time.sleep", lambda s: None)
+
+    list_payload = {"offset": 0, "limit": 100, "totalFound": 1, "content": [SR_POSTING]}
+    detail_payload = {
+        "id": SR_POSTING["id"],
+        "applyUrl": "https://jobs.smartrecruiters.com/Equinox/744000150235108-backend-slug",
+        "jobAd": {
+            "sections": {
+                "jobDescription": {"title": "Job Description", "text": "<p>Build <b>Python</b> services &#38; tools.</p>"},
+                "qualifications": {"title": "Qualifications", "text": "<ul><li>5 years experience</li></ul>"},
+            }
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/postings") or "/postings?" in url:
+            return httpx.Response(200, json=list_payload)
+        return httpx.Response(200, json=detail_payload)
+
+    adapter = SmartRecruitersAdapter(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    company = _company("equinox", "smartrecruiters", "https://jobs.smartrecruiters.com/Equinox")
+    raws = adapter.discover(company)
+    assert len(raws) == 1
+    n = adapter.normalize_raw(raws[0])
+    assert "Build Python services & tools." in (n.description or "")
+    assert "5 years experience" in (n.description or "")
+    assert n.apply_url.endswith("backend-slug")
+
+
+def test_html_to_text():
+    from app.adapters.smartrecruiters import html_to_text
+
+    assert html_to_text("<p>A <b>B</b> &amp; C</p>") == "A B & C"
+    assert html_to_text("") == ""
+
+
 def test_registry_has_new_types():
     from app.adapters.registry import get_adapter
 

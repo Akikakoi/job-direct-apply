@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     workday_max_total: int = 2000           # Workday 单站点单次搜索封顶
     workday_max_pages: int = 100            # 翻页安全上限（20/页 × 100 = 2000）
 
+    # SmartRecruiters 详情补齐（N+1，默认关；开=每次采集最多补 sr_detail_cap 条）
+    sr_fetch_details: bool = False
+    sr_detail_cap: int = 200
+
     # P2 简历解析：LLM 抽取（DeepSeek / OpenAI 兼容接口）。key 为空走规则兜底
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"
