@@ -17,6 +17,8 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
+import httpx
+
 from app.core.config import settings
 
 
@@ -51,4 +53,54 @@ def send_reminder_mail(items: list[dict]) -> bool:
         return True
     except Exception as exc:  # 网络/授权失败不影响主流程
         print(f"[notify] send failed: {type(exc).__name__}: {exc}")
+        return False
+
+
+# ---------- P4 IM webhook（钉钉/企微群机器人，与邮件互相独立） ----------
+
+
+def is_im_configured() -> bool:
+    return bool(settings.im_webhook_type and settings.im_webhook_url)
+
+
+def _dingtalk_signed_url(url: str, secret: str, timestamp_ms: int) -> str:
+    """钉钉加签：HmacSHA256(secret, "{timestamp}\\n{secret}") → base64 → urlencode。"""
+    import hashlib
+    import hmac
+    from base64 import b64encode
+    from urllib.parse import quote_plus
+
+    string_to_sign = f"{timestamp_ms}\n{secret}"
+    sign = b64encode(hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha256).digest())
+    return f"{url}&timestamp={timestamp_ms}&sign={quote_plus(sign)}"
+
+
+def _im_payload(items: list[dict]) -> dict:
+    if settings.im_webhook_type == "wecom":
+        lines = [f"**催进提醒：{len(items)} 个投递卡超 {settings.reminder_after_days} 天**"]
+        for it in items:
+            lines.append(f"> #{it['application_id']} [{it['job_title']}]({it['apply_url']}) {it['status']}，卡 {it['stuck_days']} 天")
+        return {"msgtype": "markdown", "markdown": {"content": "\n".join(lines)}}
+    # 钉钉（默认）
+    return {"msgtype": "text", "text": {"content": build_reminder_body(items)}}
+
+
+def send_reminder_im(items: list[dict]) -> bool:
+    """推送到钉钉/企微群机器人；未配置或失败返回 False（不抛出）。"""
+    if not items or not is_im_configured():
+        return False
+    url = settings.im_webhook_url
+    if settings.im_webhook_type == "dingtalk" and settings.im_webhook_secret:
+        import time as time_mod
+
+        url = _dingtalk_signed_url(url, settings.im_webhook_secret, round(time_mod.time() * 1000))
+    try:
+        resp = httpx.post(url, json=_im_payload(items), timeout=15)
+        data = resp.json()
+        ok = resp.status_code == 200 and int(data.get("errcode", 0)) == 0
+        if not ok:
+            print(f"[notify] im webhook rejected: {data}")
+        return ok
+    except Exception as exc:
+        print(f"[notify] im send failed: {type(exc).__name__}: {exc}")
         return False

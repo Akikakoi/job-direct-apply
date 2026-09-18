@@ -93,22 +93,21 @@ def collect_company_task(slug: str) -> dict:
 
 @celery_app.task(name="app.workers.celery_app.scan_reminders_task")
 def scan_reminders_task() -> dict:
-    """每日催进扫描：pending 卡超 T 天的申请；配了 SMTP 则发汇总邮件，否则打日志。"""
+    """每日催进扫描：配了 SMTP 发邮件、配了 IM webhook 推群，均未配置则打日志。"""
     from app.core.db import SessionLocal
     from app.services.applications import scan_reminders
-    from app.services.notify import is_configured, send_reminder_mail
+    from app.services.notify import is_configured, is_im_configured, send_reminder_im, send_reminder_mail
 
     with SessionLocal() as session:
         items = scan_reminders(session)
         if not items:
-            return {"total": 0, "mailed": False}
-        if is_configured():
-            mailed = send_reminder_mail(items)
-        else:
-            mailed = False
-            for it in items:  # 未配邮件：降级打日志
+            return {"total": 0, "mailed": False, "im_sent": False}
+        mailed = send_reminder_mail(items) if is_configured() else False
+        im_sent = send_reminder_im(items) if is_im_configured() else False
+        if not mailed and not im_sent:
+            for it in items:  # 邮件/IM 均未配置：降级打日志
                 print(
                     f"[reminder] application #{it['application_id']} "
                     f"{it['job_title']!r} {it['status']} 卡 {it['stuck_days']} 天 -> {it['apply_url']}"
                 )
-        return {"total": len(items), "mailed": mailed}
+        return {"total": len(items), "mailed": mailed, "im_sent": im_sent}

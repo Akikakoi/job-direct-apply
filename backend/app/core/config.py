@@ -66,5 +66,10 @@ class Settings(BaseSettings):
     ocr_model: str = "qwen-vl-plus"
     ocr_max_pages: int = 5                  # 最多渲染页数（成本控制）
 
+    # P4 IM webhook（钉钉/企微群机器人）：type 空 = 不推 IM（与邮件互相独立）
+    im_webhook_type: str = ""               # "dingtalk" | "wecom"
+    im_webhook_url: str = ""                # 机器人 webhook 地址
+    im_webhook_secret: str = ""             # 钉钉加签 secret（企微留空）
+
 
 settings = Settings()
