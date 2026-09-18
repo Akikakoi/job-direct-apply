@@ -248,3 +248,43 @@ def test_upload_rejects_bad_type(session, client):
 def test_upload_requires_input(session, client):
     resp = client.post("/api/resumes")
     assert resp.status_code == 400
+
+
+# ---------- active 标记 / 删除 / 列表（P4 挂账销项） ----------
+
+
+def test_upload_sets_active_exclusive(session, client):
+    r1 = client.post("/api/resumes", data={"raw_text": RESUME_ZH, "user_id": "5"}).json()["data"]["id"]
+    r2 = client.post("/api/resumes", data={"raw_text": RESUME_EN, "user_id": "5"}).json()["data"]["id"]
+    items = {i["id"]: i for i in client.get("/api/resumes", params={"user_id": 5}).json()["data"]["items"]}
+    assert items[r1]["is_active"] is False
+    assert items[r2]["is_active"] is True  # 新上传自动生效，旧的取消
+
+    client.post(f"/api/resumes/{r1}/activate")
+    items = {i["id"]: i for i in client.get("/api/resumes", params={"user_id": 5}).json()["data"]["items"]}
+    assert items[r1]["is_active"] is True and items[r2]["is_active"] is False
+
+
+def test_delete_resume_cascades_match_scores(session, client):
+    from app.models import Job, MatchScore
+
+    job = Job(
+        external_id="t-del",
+        title="后端工程师",
+        city="杭州市",
+        skills=["python"],
+        apply_url="https://e.com/x",
+        source="test",
+        status="active",
+    )
+    session.add(job)
+    session.commit()
+    r1 = client.post("/api/resumes", data={"raw_text": RESUME_ZH}).json()["data"]["id"]
+    client.get(f"/api/recommend?resume_id={r1}")  # 生成 match_scores
+    assert session.query(MatchScore).count() > 0
+
+    resp = client.delete(f"/api/resumes/{r1}")
+    assert resp.status_code == 200
+    assert session.query(MatchScore).count() == 0
+    assert client.get(f"/api/resumes/{r1}").status_code == 404
+    assert client.delete(f"/api/resumes/{r1}").status_code == 404  # 幂等 404

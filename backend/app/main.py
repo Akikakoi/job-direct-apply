@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -145,14 +145,79 @@ async def upload_resume(
         raw_text=text,
         profile=profile,
         lang=profile.get("lang", "zh"),
+        is_active=True,  # 新上传自动成为该用户当前生效简历
     )
+    # 同用户其他简历取消 active
+    for other in session.execute(
+        select(Resume).where(Resume.user_id == user_id, Resume.id != resume.id, Resume.is_active.is_(True))
+    ).scalars():
+        other.is_active = False
     session.add(resume)
     session.commit()
     return {
         "code": 0,
-        "data": {"id": resume.id, "profile": profile, "source": profile.get("source")},
+        "data": {"id": resume.id, "profile": profile, "source": profile.get("source"), "is_active": True},
         "message": "ok",
     }
+
+
+@app.get("/api/resumes")
+def list_resumes(user_id: int | None = None, session: Session = Depends(get_session)) -> dict:
+    stmt = select(Resume)
+    count_stmt = select(func.count()).select_from(Resume)
+    if user_id is not None:
+        stmt = stmt.where(Resume.user_id == user_id)
+        count_stmt = count_stmt.where(Resume.user_id == user_id)
+    total = session.execute(count_stmt).scalar_one()
+    rows = session.execute(stmt.order_by(Resume.created_at.desc()).limit(100)).scalars().all()
+    return {
+        "code": 0,
+        "data": {
+            "total": total,
+            "items": [
+                {
+                    "id": r.id,
+                    "user_id": r.user_id,
+                    "lang": r.lang,
+                    "is_active": bool(r.is_active),
+                    "source": (r.profile or {}).get("source"),
+                    "skills": (r.profile or {}).get("skills") or [],
+                    "created_at": str(r.created_at),
+                }
+                for r in rows
+            ],
+        },
+        "message": "ok",
+    }
+
+
+@app.post("/api/resumes/{resume_id}/activate")
+def activate_resume(resume_id: int, session: Session = Depends(get_session)) -> dict:
+    """标记该简历为当前生效（同用户其他简历取消）。"""
+    resume = session.get(Resume, resume_id)
+    if resume is None:
+        raise HTTPException(status_code=404, detail="简历不存在")
+    for other in session.execute(
+        select(Resume).where(Resume.user_id == resume.user_id, Resume.id != resume.id)
+    ).scalars():
+        other.is_active = False
+    resume.is_active = True
+    session.commit()
+    return {"code": 0, "data": {"id": resume.id, "is_active": True}, "message": "ok"}
+
+
+@app.delete("/api/resumes/{resume_id}")
+def delete_resume(resume_id: int, session: Session = Depends(get_session)) -> dict:
+    """删除简历（连带 match_scores；上传原件文件保留在磁盘）。"""
+    resume = session.get(Resume, resume_id)
+    if resume is None:
+        raise HTTPException(status_code=404, detail="简历不存在")
+    session.execute(
+        delete(MatchScore).where(MatchScore.resume_id == resume.id)
+    )
+    session.delete(resume)
+    session.commit()
+    return {"code": 0, "data": {"id": resume_id, "deleted": True}, "message": "ok"}
 
 
 @app.get("/api/resumes/{resume_id}")

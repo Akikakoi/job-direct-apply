@@ -12,5 +12,5 @@ python-multipart     # FastAPI 文件上传
 playwright           # 半自动帮填（装后需: playwright install chromium）
 pymupdf              # 扫描件 OCR：PDF 页渲染为图片
 
-# 切换 PostgreSQL 时安装：
+# 切换 PostgreSQL 时安装（生产化迁移见 scripts/migrate_sqlite_to_pg.py）：
 # psycopg2-binary

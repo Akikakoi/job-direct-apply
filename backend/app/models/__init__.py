@@ -105,7 +105,7 @@ class User(Base):
 
 
 class Resume(Base):
-    """§3.3 简历。"""
+    """§3.3 简历。is_active：同用户多份简历时标记当前生效的一份。"""
 
     __tablename__ = "resumes"
 
@@ -115,6 +115,7 @@ class Resume(Base):
     raw_text: Mapped[str | None] = mapped_column(Text)
     profile: Mapped[dict | None] = mapped_column(JSONType)
     lang: Mapped[str] = mapped_column(Text, default="zh")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

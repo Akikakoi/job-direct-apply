@@ -1,8 +1,10 @@
-# P1 本地基建：PostgreSQL 15 + Redis 7
+# P1 本地基建：PostgreSQL 15 + pgvector + Redis 7
 # 国内拉取镜像失败时，需先在 Docker Desktop 配置镜像加速（registry-mirrors）。
+# 用法：docker compose up -d
 services:
   db:
-    image: postgres:15-alpine
+    # pgvector 内置 vector 扩展（P4 语义匹配升级 PGVector 用）
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_USER: jda
       POSTGRES_PASSWORD: jda
@@ -11,10 +13,18 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jda"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    volumes:
+      - redisdata:/data
 
 volumes:
   pgdata:
+  redisdata:
