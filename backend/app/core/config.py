@@ -36,5 +36,8 @@ class Settings(BaseSettings):
     match_w_exp: float = 0.15
     match_w_role: float = 0.15
 
+    # P3 投递催进：pending 状态卡超过 T 个自然日进入提醒（§8，T 天默认值挂账销项）
+    reminder_after_days: int = 3
+
 
 settings = Settings()

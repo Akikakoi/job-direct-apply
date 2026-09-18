@@ -68,12 +68,32 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(() => new Set());
+  const [applied, setApplied] = useState(() => new Set());
+  const [apps, setApps] = useState([]);
+  const [reminders, setReminders] = useState([]);
 
   useEffect(() => {
     const saved = localStorage.getItem("resume_id");
     if (saved) loadRecommend(Number(saved));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function loadSideData() {
+    try {
+      const [appsResp, remResp] = await Promise.all([
+        fetch("/api/applications?user_id=1&limit=50"),
+        fetch("/api/reminders?user_id=1"),
+      ]);
+      if (appsResp.ok) {
+        setApps((await appsResp.json()).data.items);
+      }
+      if (remResp.ok) {
+        setReminders((await remResp.json()).data.items);
+      }
+    } catch {
+      /* 侧栏数据失败不阻塞主流程 */
+    }
+  }
 
   async function loadRecommend(resumeId) {
     setLoading(true);
@@ -92,10 +112,33 @@ export default function Home() {
       setResume({ id: resumeId });
       setItems(body.data.items);
       setTotal(body.data.total);
+      loadSideData();
     } catch (err) {
       setError(String(err.message || err));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function markApplied(job) {
+    setError("");
+    try {
+      const resp = await fetch("/api/applications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: 1,
+          resume_id: resume?.id ?? null,
+          job_id: job.job_id,
+          authorized: true, // 点击即视为用户确认授权投递
+        }),
+      });
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body.detail || `标记失败 ${resp.status}`);
+      setApplied((prev) => new Set(prev).add(job.job_id));
+      loadSideData();
+    } catch (err) {
+      setError(String(err.message || err));
     }
   }
 
@@ -193,6 +236,14 @@ export default function Home() {
                     <a className="link" href={job.apply_url} target="_blank" rel="noreferrer">
                       直达申请 ↗
                     </a>
+                    {"  "}
+                    {applied.has(job.job_id) || apps.some((a) => a.job_id === job.job_id && a.status !== "closed" && a.status !== "rejected") ? (
+                      <span className="meta">已投递</span>
+                    ) : (
+                      <button className="ghost" style={{ padding: "3px 10px", fontSize: 12 }} onClick={() => markApplied(job)}>
+                        标记已投递
+                      </button>
+                    )}
                   </div>
                 </div>
                 {job.skills?.length ? (
@@ -215,6 +266,37 @@ export default function Home() {
               </div>
             ))
           )}
+        </div>
+      ) : null}
+
+      {apps.length || reminders.length ? (
+        <div className="card">
+          <h2>我的投递（{apps.length}）</h2>
+          {reminders.length ? (
+            <div className="error" style={{ marginBottom: 12 }}>
+              催进提醒：{reminders.length} 个申请卡住超过 3 天（
+              {reminders.map((r) => `#${r.application_id} ${r.job_title.slice(0, 18)} ${r.stuck_days}天`).join("；")}
+              ），建议去 ATS 后台查看进度
+            </div>
+          ) : null}
+          {apps.map((a) => (
+            <div className="job" key={a.id}>
+              <div className="job-head">
+                <div>
+                  <div className="job-title">{a.job_title}</div>
+                  <div className="meta">
+                    {a.city || ""} ｜ 投递于 {a.created_at.slice(0, 10)}
+                  </div>
+                </div>
+                <div className="row">
+                  <span className="chip">{a.status}</span>
+                  <a className="link" href={a.apply_url} target="_blank" rel="noreferrer">
+                    打开申请页 ↗
+                  </a>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       ) : null}
     </div>

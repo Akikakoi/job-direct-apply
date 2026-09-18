@@ -12,10 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.models import Job, MatchScore, Resume
+from app.models import Application, Job, MatchScore, Resume
 from app.pipelines.match import refresh_matches
 from app.pipelines.parse import parse_resume_text
 from app.pipelines.text_extract import UnsupportedFile, extract_text
+from app.services.applications import IllegalTransition, scan_reminders, transition
 from app.services.city import city_match_variants
 
 
@@ -254,3 +255,131 @@ def recommend(
         },
         "message": "ok",
     }
+
+
+# ---------- P3 投递闭环（§8） ----------
+
+
+class ApplicationCreate(BaseModel):
+    user_id: int
+    resume_id: int | None = None
+    job_id: int
+    authorized: bool  # 合规钩子：用户确认授权投递
+
+
+class StatusUpdate(BaseModel):
+    status: str
+    note: str | None = None
+
+
+@app.post("/api/applications")
+def create_application(
+    body: ApplicationCreate, session: Session = Depends(get_session)
+) -> dict:
+    """创建投递记录（直达链接模式）。authorized=false 拒绝（§4 合规钩子）。"""
+    if not body.authorized:
+        raise HTTPException(status_code=403, detail="投递需用户授权（authorized=true）")
+    job = session.get(Job, body.job_id)
+    if job is None or job.status != "active":
+        raise HTTPException(status_code=404, detail="职位不存在或已失效")
+    if body.resume_id is not None and session.get(Resume, body.resume_id) is None:
+        raise HTTPException(status_code=404, detail="简历不存在")
+
+    # 防重复：同用户同职位已有进行中的申请
+    dup = session.execute(
+        select(Application).where(
+            Application.user_id == body.user_id,
+            Application.job_id == body.job_id,
+            Application.status.notin_(["closed", "rejected"]),
+        )
+    ).scalars().first()
+    if dup is not None:
+        raise HTTPException(status_code=409, detail=f"该职位已在投递流程中（#{dup.id}，{dup.status}）")
+
+    app_row = Application(
+        user_id=body.user_id,
+        resume_id=body.resume_id,
+        job_id=body.job_id,
+        mode="direct_link",  # 半自动帮填（semi_auto）为 P3 后半
+        status="submitted",
+        apply_url=job.apply_url,
+    )
+    session.add(app_row)
+    session.commit()
+    return {
+        "code": 0,
+        "data": {
+            "id": app_row.id,
+            "status": app_row.status,
+            "apply_url": app_row.apply_url,
+        },
+        "message": "ok",
+    }
+
+
+@app.get("/api/applications")
+def list_applications(
+    user_id: int | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    session: Session = Depends(get_session),
+) -> dict:
+    stmt = select(Application, Job).join(Job, Application.job_id == Job.id)
+    count_stmt = select(func.count()).select_from(Application)
+    if user_id is not None:
+        stmt = stmt.where(Application.user_id == user_id)
+        count_stmt = count_stmt.where(Application.user_id == user_id)
+    if status is not None:
+        stmt = stmt.where(Application.status == status)
+        count_stmt = count_stmt.where(Application.status == status)
+    total = session.execute(count_stmt).scalar_one()
+    rows = session.execute(stmt.order_by(Application.updated_at.desc()).limit(min(limit, 200))).all()
+    return {
+        "code": 0,
+        "data": {
+            "total": total,
+            "items": [
+                {
+                    "id": app.id,
+                    "user_id": app.user_id,
+                    "job_id": job.id,
+                    "job_title": job.title,
+                    "city": job.city,
+                    "status": app.status,
+                    "apply_url": app.apply_url or job.apply_url,
+                    "created_at": str(app.created_at),
+                    "updated_at": str(app.updated_at),
+                }
+                for app, job in rows
+            ],
+        },
+        "message": "ok",
+    }
+
+
+@app.post("/api/applications/{application_id}/status")
+def update_application_status(
+    application_id: int, body: StatusUpdate, session: Session = Depends(get_session)
+) -> dict:
+    """状态机迁移（非法迁移 400），变更写入 feedback_log。"""
+    app_row = session.get(Application, application_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="投递记录不存在")
+    try:
+        app_row = transition(session, app_row, body.status, note=body.note)
+    except IllegalTransition as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "code": 0,
+        "data": {"id": app_row.id, "status": app_row.status},
+        "message": "ok",
+    }
+
+
+@app.get("/api/reminders")
+def reminders(
+    user_id: int | None = None, session: Session = Depends(get_session)
+) -> dict:
+    """催进扫描：submitted/under_review 卡超过 T 天（settings.reminder_after_days，默认 3）。"""
+    items = scan_reminders(session, user_id=user_id)
+    return {"code": 0, "data": {"total": len(items), "items": items}, "message": "ok"}
