@@ -1,9 +1,12 @@
-"""简历文件文本抽取：txt/md 直读，pdf 用 pypdf（纯文本型；扫描件 OCR 挂账 P3+）。"""
+"""简历文件文本抽取：txt/md 直读；pdf 先 pypdf（纯文本型），
+抽出文本过少判定为扫描件 → 走 OCR（app/pipelines/ocr.py，需配置视觉 API）。"""
 
 from __future__ import annotations
 
 MAX_FILE_BYTES = 5 * 1024 * 1024  # 5MB
 SUPPORTED_SUFFIXES = {".txt", ".md", ".pdf"}
+# 平均每页低于该字符数 → 判定扫描件（pypdf 对图片型 PDF 只能抽出空串/乱码页眉）
+SCANNED_CHARS_PER_PAGE = 20
 
 
 class UnsupportedFile(Exception):
@@ -28,4 +31,16 @@ def extract_pdf_text(data: bytes) -> str:
 
     reader = PdfReader(io.BytesIO(data))
     pages = [(page.extract_text() or "") for page in reader.pages]
-    return "\n".join(p for p in pages if p.strip())
+    text = "\n".join(p for p in pages if p.strip())
+    if _looks_scanned(reader.pages and len(reader.pages) or 1, text):
+        # 扫描件：pypdf 无能为力，转 OCR（未配置 OCR 时抛 OcrNotConfigured 明确报错）
+        from app.pipelines.ocr import ocr_pdf
+
+        return ocr_pdf(data)
+    return text
+
+
+def _looks_scanned(n_pages: int, text: str) -> bool:
+    if n_pages <= 0:
+        return False
+    return len(text.strip()) / n_pages < SCANNED_CHARS_PER_PAGE

@@ -60,5 +60,11 @@ class Settings(BaseSettings):
     smtp_password: str = ""                 # SMTP 授权码（非登录密码）
     notify_email: str = ""                  # 收件邮箱（催进提醒接收方）
 
+    # P4 扫描件 PDF OCR：OpenAI 兼容视觉 API（如 DashScope qwen-vl）。key 空 = 不支持扫描件
+    ocr_api_key: str = ""
+    ocr_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    ocr_model: str = "qwen-vl-plus"
+    ocr_max_pages: int = 5                  # 最多渲染页数（成本控制）
+
 
 settings = Settings()

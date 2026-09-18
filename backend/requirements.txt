@@ -7,9 +7,10 @@ httpx
 alembic
 pytest
 celery
-pypdf                # 简历 PDF 文本抽取（扫描件 OCR 未含）
+pypdf                # 简历 PDF 文本抽取（扫描件走 OCR）
 python-multipart     # FastAPI 文件上传
 playwright           # 半自动帮填（装后需: playwright install chromium）
+pymupdf              # 扫描件 OCR：PDF 页渲染为图片
 
 # 切换 PostgreSQL 时安装：
 # psycopg2-binary
