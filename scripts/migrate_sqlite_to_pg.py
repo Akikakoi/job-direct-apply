@@ -85,6 +85,28 @@ def main() -> int:
             total_moved += moved
             print(f"{model.__tablename__:16s} {len(rows):5d} 行（新搬 {moved}）")
 
+        # 重置 identity 序列到 max(id)（关键：搬运保留了显式主键，PG 的
+        # identity sequence 仍从 1 计数，不重置则新插入撞主键 UniqueViolation）
+        from sqlalchemy import create_engine as _ce, text as _text
+
+        seq_engine = _ce(settings.database_url)
+        with seq_engine.begin() as conn:
+            for model in TABLES:
+                table = model.__tablename__
+                max_id = conn.execute(
+                    _text(f"SELECT COALESCE(MAX(id), 0) FROM {table}")
+                ).scalar_one()
+                seq = conn.execute(
+                    _text("SELECT pg_get_serial_sequence(:t, :c)"), {"t": table, "c": "id"}
+                ).scalar()
+                if seq is None:
+                    continue
+                conn.execute(
+                    _text("SELECT setval(CAST(:s AS regclass), :v, :has)"),
+                    {"s": seq, "v": max(max_id, 1), "has": max_id > 0},
+                )
+        print("\nidentity 序列已重置到 max(id)")
+
         # 对账
         print("\n行数对账（sqlite vs pg）：")
         ok = True
