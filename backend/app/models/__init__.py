@@ -71,6 +71,8 @@ class Job(Base):
     external_id: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     city: Mapped[str | None] = mapped_column(Text)
+    # 规范化多城市索引串（city.py city_keys 生成，"|" 连接；查询侧双列 LIKE）
+    city_keys: Mapped[str | None] = mapped_column(Text)
     skills: Mapped[list] = mapped_column(JSONType, default=list)  # skill_tags 标准标签
     experience_min: Mapped[int | None] = mapped_column(Integer)
     degree_req: Mapped[str | None] = mapped_column(Text)  # bachelor|master|phd|na

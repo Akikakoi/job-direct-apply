@@ -10,8 +10,11 @@ class Settings(BaseSettings):
 
     # SQLite 开箱即用；生产切 PostgreSQL（需另装 psycopg2-binary）
     database_url: str = "sqlite:///./dev.db"
-    # 空 = 不启用 Redis（限流退化为 DB 间隔守卫）
+    # 空 = 不启用 Redis（限流退化为 DB 间隔守卫，别名缓存退化为直查 DB）
     redis_url: str = ""
+
+    # skill_tags 别名映射的 Redis 缓存 TTL（秒）；skill_tags 有维护动作后等 TTL 或手动清 key
+    alias_cache_ttl_s: int = 600
 
     http_timeout_s: int = 30
     ua: str = "job-direct-apply-bot/0.1 (compliant; contact: dev@example.com)"

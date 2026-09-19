@@ -80,12 +80,14 @@ def _exp_fit(profile: dict, job: Job, explain: list[dict]) -> float:
 def _city_fit(profile: dict, job: Job, explain: list[dict]) -> float:
     job_city = (job.city or "").strip()
     job_city_l = job_city.lower()
+    # 优先用规范化多城市索引串（city_keys，别名/多城市拆分已在采集侧展开）
+    job_keys_l = (getattr(job, "city_keys", None) or "").lower()
     variants: list[str] = []
     for c in profile.get("cities") or []:
         variants.extend(city_match_variants(str(c)))
     score = 0.0
     note = None
-    if variants and any(v in job_city_l for v in variants):
+    if variants and (any(v in job_keys_l for v in variants if v) or any(v in job_city_l for v in variants)):
         score = 1.0
     elif "remote" in job_city_l or "远程" in job_city:
         score = 0.8
@@ -143,16 +145,11 @@ def compute_match(profile: dict, job: Job, vec_score: float | None = None) -> di
     return {"score": final, "rule": rule, "explain": explain}
 
 
-def refresh_matches(session: Session, resume: Resume) -> int:
-    """重算该简历对全部 active 职位的融合分，先删后插（幂等）。
-
-    TF-IDF 索引每次重建（3470 条毫秒级），切 PG/向量模型时只换此实现。
-    """
+def _rebuild(session: Session, resume: Resume, jobs: list[Job], index: TfidfIndex) -> int:
+    """对单份简历重建 match_scores（先删后插，幂等）；索引由调用方传入复用。"""
     session.execute(delete(MatchScore).where(MatchScore.resume_id == resume.id))
-    jobs = session.execute(select(Job).where(Job.status == "active")).scalars().all()
     profile = resume.profile or {}
 
-    index = TfidfIndex().fit([job_text(j.title, j.description, j.skills) for j in jobs])
     query_vec = index.build_query(resume_query_text(profile, resume.raw_text))
     use_semantic = bool(query_vec)  # 简历无有效文本时退纯规则分
 
@@ -173,3 +170,28 @@ def refresh_matches(session: Session, resume: Resume) -> int:
     session.add_all(rows)
     session.commit()
     return len(rows)
+
+
+def refresh_matches(session: Session, resume: Resume) -> int:
+    """重算该简历对全部 active 职位的融合分，先删后插（幂等）。
+
+    TF-IDF 索引每次重建（3470 条毫秒级），切 PG/向量模型时只换此实现。
+    """
+    jobs = session.execute(select(Job).where(Job.status == "active")).scalars().all()
+    index = TfidfIndex().fit([job_text(j.title, j.description, j.skills) for j in jobs])
+    return _rebuild(session, resume, jobs, index)
+
+
+def refresh_matches_all(session: Session, resumes: list[Resume] | None = None) -> int:
+    """全量简历重算（挂账销项：职位新增/更新/过期后由采集侧触发）。
+
+    TF-IDF 索引只建一次，多份简历共享（4547 条职位 × N 份简历仍秒级）。
+    返回重算的 match_scores 总行数；无简历时返回 0。
+    """
+    if resumes is None:
+        resumes = session.execute(select(Resume)).scalars().all()
+    if not resumes:
+        return 0
+    jobs = session.execute(select(Job).where(Job.status == "active")).scalars().all()
+    index = TfidfIndex().fit([job_text(j.title, j.description, j.skills) for j in jobs])
+    return sum(_rebuild(session, r, jobs, index) for r in resumes)

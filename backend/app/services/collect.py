@@ -2,13 +2,16 @@
 
 对应开发文档 §5.2 采集流程与 §9 幂等要求：
 - 去重：按 UNIQUE (company_id, external_id) upsert；
-- 限流：公司级最小采集间隔（fetch_policy.interval_min），间隔内直接 skip；
+- 限流：DB 间隔守卫（公司级最小采集间隔）+ Redis 令牌桶跨进程第二层
+  （beat 与手动 CLI 并发时防双抓；Redis 不可用自动退化）；
 - 保鲜：本轮"见过"的职位强制刷新 updated_at；连续 N 个周期未见 → expired；
-- 审计：每次真实尝试写一条 fetch_log。
+- 审计：每次真实尝试写一条 fetch_log；
+- 职位有增/改/过期 → 触发全量简历重算 match_scores（挂账销项，可关）。
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 
 import httpx
@@ -17,7 +20,10 @@ from sqlalchemy.orm import Session
 
 from app.adapters.registry import get_adapter
 from app.core.config import settings
+from app.core.redis_utils import get_redis
 from app.models import Company, FetchLog, Job, SkillTag
+from app.services.city import city_keys
+from app.services.ratelimit import acquire
 
 # 内置别名表：与 skill_tags 字典合并使用（§3.9）
 BUILTIN_ALIAS: dict[str, str] = {
@@ -52,12 +58,35 @@ BUILTIN_ALIAS: dict[str, str] = {
 }
 
 
-def build_alias_map(session: Session) -> dict[str, str]:
+ALIAS_MAP_CACHE_KEY = "cache:alias_map"
+
+
+def build_alias_map(session: Session, use_cache: bool = True) -> dict[str, str]:
+    """别名映射（BUILTIN + skill_tags 字典），Redis 可用时带 TTL 缓存（挂账销项）。
+
+    缓存失效：TTL 到期（settings.alias_cache_ttl_s）或手动 DEL cache:alias_map。
+    Redis 不可用时直查 DB，行为与旧版一致。
+    """
+    client = get_redis() if use_cache else None
+    if client is not None:
+        try:
+            cached = client.get(ALIAS_MAP_CACHE_KEY)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass  # 缓存读失败按 miss 处理
+
     mapping = dict(BUILTIN_ALIAS)
     for tag in session.execute(select(SkillTag)).scalars():
         mapping[tag.canonical.lower()] = tag.canonical
         for alias in tag.aliases or []:
             mapping[str(alias).lower()] = tag.canonical
+
+    if client is not None:
+        try:
+            client.setex(ALIAS_MAP_CACHE_KEY, settings.alias_cache_ttl_s, json.dumps(mapping, ensure_ascii=False))
+        except Exception:
+            pass  # 缓存写失败不影响主流程
     return mapping
 
 
@@ -101,6 +130,7 @@ def collect_company(
     company: Company,
     now: datetime | None = None,
     client: httpx.Client | None = None,
+    rematch: bool = True,
 ) -> dict:
     now = now or datetime.utcnow()
     started = now
@@ -116,6 +146,17 @@ def collect_company(
     )
     if last_ok is not None and last_ok.started_at >= now - timedelta(minutes=_interval_min(company)):
         return {"company": company.slug, "status": "skipped", "reason": "interval_guard"}
+
+    # Redis 令牌桶第二层（跨进程防双抓）；None = Redis 不可用，沿用 DB 守卫
+    allowed = acquire(company.slug, 1, _interval_min(company) * 60)
+    if allowed is False:
+        log = FetchLog(
+            company_id=company.id, status="rate_limited", job_count=0, started_at=started
+        )
+        log.finished_at = datetime.utcnow()
+        session.add(log)
+        session.commit()
+        return {"company": company.slug, "status": "skipped", "reason": "token_bucket"}
 
     log = FetchLog(company_id=company.id, status="success", job_count=0, started_at=started)
     try:
@@ -138,6 +179,7 @@ def collect_company(
         n.skills = canonicalize_skills(n.skills, alias_map)
         row = n.to_row()
         eid = row["external_id"]
+        row["city_keys"] = city_keys(row.get("city"))  # 规范化多城市索引串（多值召回）
         job = pending.get(eid)
         if job is None:
             job = (
@@ -169,7 +211,8 @@ def collect_company(
     log.finished_at = datetime.utcnow()
     session.add(log)
     session.commit()
-    return {
+
+    result = {
         "company": company.slug,
         "status": "ok",
         "discovered": len(normalized),
@@ -177,6 +220,12 @@ def collect_company(
         "updated": len(updated_ids),
         "expired": expired,
     }
+    # 挂账销项：职位有增/改/过期 → 全量简历重算 match_scores（无简历或 rematch=False 跳过）
+    if rematch and (inserted or updated_ids or expired):
+        from app.pipelines.match import refresh_matches_all  # 延迟导入避免循环依赖
+
+        result["rematched"] = refresh_matches_all(session)
+    return result
 
 
 def collect_all(session: Session, now: datetime | None = None) -> list[dict]:

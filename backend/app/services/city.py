@@ -13,9 +13,16 @@
 - LIKE 通配符（% _ \）转义，避免用户输入干扰匹配。
 
 采集侧（collect.py）不做改写，保留原始 city 值以便追溯源数据。
+
+多值升级（city_keys 列）：jobs.city 原样保留（展示/追溯用），采集侧另算
+city_keys = 规范化小写词元用 "|" 连接（分号/顿号/竖线/斜杠拆多城市，逗号不拆
+——"New York, NY" 是单城市的州后缀）。查询侧 city_keys/city 双列 LIKE，
+aliases 在存储侧展开（库内存 "NYC" 也能被 "New York" 召回）。
 """
 
 from __future__ import annotations
+
+import re
 
 # 常见别名 → 标准写法（小写键）。按需补充，先覆盖实测库内出现的别名。
 CITY_ALIASES: dict[str, list[str]] = {
@@ -60,3 +67,37 @@ def city_match_variants(city: str | None) -> list[str]:
         if base:
             bases.add(base.lower())
     return sorted(_escape_like(b) for b in bases)
+
+
+# 多城市分隔符：分号/顿号/竖线/斜杠/加号（逗号不拆，"New York, NY" 是州后缀）
+_CITY_SPLIT_RE = re.compile(r"[;；、|/+]")
+
+
+def split_city_tokens(city: str | None) -> list[str]:
+    """把库内 city 串拆成多城市词元（保留原始大小写与内部逗号）。"""
+    if not city:
+        return []
+    return [t.strip() for t in _CITY_SPLIT_RE.split(city) if t.strip()]
+
+
+def city_keys(city: str | None) -> str | None:
+    """规范化多城市索引串：词元小写 + 别名展开 + 去"市"后缀，"|" 连接。
+
+    例：
+      "杭州市"                    -> "杭州"
+      "Menlo Park, CA; New York"  -> "menlo park, ca|new york"
+      "NYC"                       -> "new york|nyc"   （别名双向可召回）
+      "上海、北京"                -> "上海|北京"
+    查询侧对该串做 LIKE，天然覆盖单城市/多城市/别名三类场景。
+    """
+    tokens = split_city_tokens(city)
+    if not tokens:
+        return None
+    keys: set[str] = set()
+    for token in tokens:
+        lowered = token.lower()
+        if lowered.endswith("市") and len(lowered) > 1:
+            lowered = lowered[:-1]  # 去"市"后缀（原词与基词是同一城市，不双存）
+        keys.add(lowered)
+        keys.update(CITY_ALIASES.get(lowered, []))
+    return "|".join(sorted(k for k in keys if k))

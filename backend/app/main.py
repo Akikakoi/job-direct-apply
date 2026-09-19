@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.models import Application, Job, MatchScore, Resume
+from app.models import Application, Company, Job, MatchScore, Resume
 from app.pipelines.match import refresh_matches
 from app.pipelines.parse import parse_resume_text
 from app.pipelines.text_extract import UnsupportedFile, extract_text
@@ -49,8 +49,13 @@ def list_jobs(
     if city:
         # 城市规范化：contains 匹配，"杭州"命中"杭州市"、"New York"
         # 命中 "New York, NY" 与多城市串，别名 NYC→New York。
+        # 双列匹配：优先规范化多城市索引串 city_keys（别名/多城市已在采集侧展开），
+        # 未回填 city_keys 的旧行回退原 city 列。
         conds = [
-            func.lower(Job.city).like(f"%{v}%", escape="\\")
+            or_(
+                func.lower(Job.city_keys).like(f"%{v}%", escape="\\"),
+                func.lower(Job.city).like(f"%{v}%", escape="\\"),
+            )
             for v in city_match_variants(city)
         ]
         if conds:
@@ -450,6 +455,145 @@ def reminders(
     """催进扫描：submitted/under_review 卡超过 T 天（settings.reminder_after_days，默认 3）。"""
     items = scan_reminders(session, user_id=user_id)
     return {"code": 0, "data": {"total": len(items), "items": items}, "message": "ok"}
+
+
+# ---------- P4 收尾：companies admin API（挂账销项） ----------
+
+
+class CompanyUpsert(BaseModel):
+    slug: str
+    name: str
+    ats_type: str
+    site_url: str | None = None
+    feed_url: str | None = None
+    locale: str = "zh-CN"
+    auth_type: str = "public"
+    fetch_policy: dict = {"interval_min": 360}
+    is_active: bool = True
+
+
+def _company_out(session: Session, company: Company) -> dict:
+    job_count = session.execute(
+        select(func.count()).select_from(Job).where(Job.company_id == company.id)
+    ).scalar_one()
+    return {
+        "id": company.id,
+        "slug": company.slug,
+        "name": company.name,
+        "ats_type": company.ats_type,
+        "site_url": company.site_url,
+        "feed_url": company.feed_url,
+        "locale": company.locale,
+        "auth_type": company.auth_type,
+        "fetch_policy": company.fetch_policy,
+        "is_active": bool(company.is_active),
+        "job_count": job_count,
+    }
+
+
+@app.get("/api/companies")
+def list_companies(
+    is_active: bool | None = None, session: Session = Depends(get_session)
+) -> dict:
+    stmt = select(Company).order_by(Company.id.asc())
+    if is_active is not None:
+        stmt = stmt.where(Company.is_active.is_(is_active))
+    rows = session.execute(stmt).scalars().all()
+    return {
+        "code": 0,
+        "data": {"total": len(rows), "items": [_company_out(session, c) for c in rows]},
+        "message": "ok",
+    }
+
+
+@app.post("/api/companies")
+def create_company(body: CompanyUpsert, session: Session = Depends(get_session)) -> dict:
+    """新增公司映射；slug 冲突 409，ats_type 未注册 400（采集前先校验）。"""
+    from app.adapters.registry import ADAPTERS
+
+    if session.execute(
+        select(func.count()).select_from(Company).where(Company.slug == body.slug)
+    ).scalar_one():
+        raise HTTPException(status_code=409, detail=f"slug 已存在: {body.slug}")
+    if body.ats_type not in ADAPTERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未注册的 ATS 类型: {body.ats_type}（可用: {sorted(ADAPTERS)}）",
+        )
+    company = Company(**body.model_dump())
+    session.add(company)
+    session.commit()
+    return {"code": 0, "data": _company_out(session, company), "message": "ok"}
+
+
+@app.put("/api/companies/{company_id}")
+def update_company(
+    company_id: int, body: CompanyUpsert, session: Session = Depends(get_session)
+) -> dict:
+    """全量更新公司映射（含 is_active 启停）。"""
+    from app.adapters.registry import ADAPTERS
+
+    company = session.get(Company, company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="公司不存在")
+    if body.ats_type not in ADAPTERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未注册的 ATS 类型: {body.ats_type}（可用: {sorted(ADAPTERS)}）",
+        )
+    dup = session.execute(
+        select(Company).where(Company.slug == body.slug, Company.id != company_id)
+    ).scalars().first()
+    if dup is not None:
+        raise HTTPException(status_code=409, detail=f"slug 已存在: {body.slug}")
+    for key, value in body.model_dump().items():
+        setattr(company, key, value)
+    session.commit()
+    return {"code": 0, "data": _company_out(session, company), "message": "ok"}
+
+
+@app.delete("/api/companies/{company_id}")
+def delete_company(
+    company_id: int, force: bool = False, session: Session = Depends(get_session)
+) -> dict:
+    """删除公司映射；有职位时默认 409 拒绝，force=true 连带职位与 match_scores。"""
+    company = session.get(Company, company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="公司不存在")
+    job_ids = [
+        row for row in session.execute(select(Job.id).where(Job.company_id == company.id)).scalars()
+    ]
+    if job_ids and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该公司下有 {len(job_ids)} 条职位；确认删除请加 force=true（连带 match_scores）",
+        )
+    if job_ids:
+        session.execute(delete(MatchScore).where(MatchScore.job_id.in_(job_ids)))
+        session.execute(delete(Job).where(Job.company_id == company.id))
+    session.delete(company)
+    session.commit()
+    return {
+        "code": 0,
+        "data": {"id": company_id, "deleted": True, "jobs_deleted": len(job_ids)},
+        "message": "ok",
+    }
+
+
+# ---------- P4 收尾：质量基线报告（挂账销项） ----------
+
+
+@app.get("/api/insights/quality")
+def quality_insights(
+    user_id: int | None = None,
+    k: int = 10,
+    session: Session = Depends(get_session),
+) -> dict:
+    """质量基线：反馈覆盖 / 命中率 / 各结果组均分 / NDCG@k（口径见 insights.py）。"""
+    from app.services.insights import build_quality_report
+
+    report = build_quality_report(session, user_id=user_id, k=k)
+    return {"code": 0, "data": report, "message": "ok"}
 
 
 @app.post("/api/applications/{application_id}/autofill")
