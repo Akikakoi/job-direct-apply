@@ -14,6 +14,17 @@ function scoreColor(score) {
   return score >= 0.7 ? "var(--ok)" : score >= 0.4 ? "var(--warn)" : "var(--muted)";
 }
 
+// 后端 500 返回纯文本 "Internal Server Error"，直接 resp.json() 会抛
+// "Unexpected token 'I'" 掩盖真实状态码；统一 text → JSON 容错解析。
+async function toJson(resp) {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 function ExplainItem({ e }) {
   const label = EXPLAIN_LABEL[e.key] || e.key;
   const pct = Math.round((e.score ?? 0) * 100);
@@ -133,8 +144,8 @@ export default function Home() {
           authorized: true, // 点击即视为用户确认授权投递
         }),
       });
-      const body = await resp.json();
-      if (!resp.ok) throw new Error(body.detail || `标记失败 ${resp.status}`);
+      const body = await toJson(resp);
+      if (!resp.ok) throw new Error(body?.detail || `标记失败 ${resp.status}`);
       setApplied((prev) => new Set(prev).add(job.job_id));
       loadSideData();
     } catch (err) {
@@ -151,8 +162,13 @@ export default function Home() {
       const form = new FormData();
       form.append("file", file);
       const resp = await fetch("/api/resumes", { method: "POST", body: form });
-      const body = await resp.json();
-      if (!resp.ok) throw new Error(body.detail || `上传失败 ${resp.status}`);
+      const body = await toJson(resp);
+      if (!resp.ok) {
+        throw new Error(body?.detail || `上传失败（服务端错误 ${resp.status}，请重试或查看后端日志）`);
+      }
+      if (!body?.data?.id) {
+        throw new Error("上传响应异常：缺少简历 id");
+      }
       const id = body.data.id;
       localStorage.setItem("resume_id", String(id));
       setResume({ id, profile: body.data.profile, source: body.data.source });

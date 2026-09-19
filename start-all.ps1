@@ -36,6 +36,17 @@ function Test-Port([int]$Port) {
     }
 }
 
+# 验明正身：端口 UP 且 /health 是本项目的响应才算"后端在跑"
+# （8000 曾被 stellar-mall 后端占用，纯端口检查会误报 SKIP）
+function Test-Backend {
+    if (-not (Test-Port 8001)) { return "down" }
+    try {
+        $h = Invoke-RestMethod -Uri "http://127.0.0.1:8001/health" -TimeoutSec 3
+        if ($h.status -eq "ok") { return "ours" }
+    } catch { }
+    return "foreign"
+}
+
 function Wait-Port([int]$Port, [string]$Name, [int]$Seconds) {
     for ($i = 0; $i -lt $Seconds; $i += 2) {
         if (Test-Port $Port) {
@@ -59,7 +70,8 @@ function Main {
     # ---------- Stop：停止三服务 ----------
     if ($Stop) {
         Write-Host "== 停止服务 =="
-        foreach ($port in 8000, 3000) {
+        # 只停本项目端口（8001）；8000 可能是 stellar-mall 等其他项目的服务，不碰
+        foreach ($port in 8001, 3000) {
             Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
                 Select-Object -ExpandProperty OwningProcess -Unique |
                 ForEach-Object {
@@ -116,16 +128,23 @@ function Main {
     if (Test-Port 6379) { Write-Host "[OK] Redis 6379 在线" }
     else { Write-Host "[FAIL] Redis 6379 未监听"; return }
 
-    # ---------- 3a. 后端 uvicorn :8000 ----------
+    # ---------- 3a. 后端 uvicorn :8001（8000 让给 stellar-mall）----------
     Write-Host "== 3/3 后端 + 前端 =="
-    if (Test-Port 8000) {
-        Write-Host "[SKIP] 后端已在运行 (port 8000)"
+    $backendState = Test-Backend
+    if ($backendState -eq "ours") {
+        Write-Host "[SKIP] 后端已在运行 (port 8001)"
+    } elseif ($backendState -eq "foreign") {
+        Write-Host "[FAIL] 端口 8001 被其他服务占用且 /health 不是本项目响应，请排查"; return
     } else {
-        $uvicornCmd = "cd /d `"$Backend`" && `"$PyExe`" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > `"$LogDir\uvicorn.log`" 2>&1"
+        $uvicornCmd = "cd /d `"$Backend`" && `"$PyExe`" -m uvicorn app.main:app --host 0.0.0.0 --port 8001 > `"$LogDir\uvicorn.log`" 2>&1"
         Start-Hidden $uvicornCmd
-        if (-not (Wait-Port 8000 "后端 uvicorn" 30)) {
-            Write-Host "[FAIL] 后端启动失败，日志: $LogDir\uvicorn.log"; return
+        $ready = $false
+        for ($i = 0; $i -lt 30; $i += 2) {
+            if ((Test-Backend) -eq "ours") { $ready = $true; break }
+            Start-Sleep -Seconds 2
         }
+        if ($ready) { Write-Host "[OK] 后端 uvicorn 已就绪 (port 8001)" }
+        else { Write-Host "[FAIL] 后端启动失败，日志: $LogDir\uvicorn.log"; return }
     }
 
     # ---------- 3b. 前端 Next.js :3000 ----------
@@ -149,7 +168,7 @@ function Main {
 
     # ---------- 冒烟 ----------
     $health = $null
-    try { $health = Invoke-RestMethod -Uri "http://localhost:8000/health" -TimeoutSec 5 } catch { }
+    try { $health = Invoke-RestMethod -Uri "http://127.0.0.1:8001/health" -TimeoutSec 5 } catch { }
 
     Write-Host ""
     if ($health -and $health.status -eq "ok") {
