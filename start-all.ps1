@@ -1,16 +1,19 @@
 ﻿# 简历直达 · 一键启动三服务（PG/Redis 容器 + 后端 uvicorn + 前端 Next.js）
 # 用法：
-#   .\start-all.ps1              # 常规启动（前端 dev 模式）
+#   .\start-all.ps1              # 常规启动（前端 dev 模式；后端/前端各开一个
+#                                #   日志窗口，实时滚动输出，同时落文件）
 #   .\start-all.ps1 -Prod        # 前端走 build + start
 #   .\start-all.ps1 -Stop        # 停止三服务（容器 stop，进程 kill）
 #   .\start-all.ps1 -NoPause     # 自动化场景：跑完不停留（CI/会话内调用）
+#   .\start-all.ps1 -Hidden      # 不弹日志窗口，输出只落 logs/（自动化用）
 # 幂等：端口已在监听的组件自动跳过，可重复执行。
 # 双击运行请用 start-all.cmd（跑完窗口停住，能看到结果）。
 
 param(
     [switch]$Prod,
     [switch]$Stop,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$Hidden   # 自动化场景：不弹服务窗口，日志只落文件（默认弹窗显示日志）
 )
 
 # 启动器不做全局 Stop：PS5.1 下原生命令（docker）往 stderr 写进度会被当作
@@ -64,6 +67,21 @@ function Start-Hidden([string]$Cmd) {
     Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $Cmd -WindowStyle Hidden
 }
 
+# 可见窗口拉起长驻进程：日志实时滚动在窗口里 + 逐行追加 UTF-8 文件留档
+# （PS5.1 的 Tee-Object 落 UTF-16，grep 不友好，故用 Add-Content -Encoding UTF8）。
+# -NoExit：进程退出后窗口保留，方便看最后的报错。
+function Start-ServiceWindow([string]$Title, [string]$WorkDir, [string]$Command, [string]$LogFile) {
+    if ($Hidden) {
+        Start-Hidden "cd /d `"$WorkDir`" && $Command > `"$LogFile`" 2>&1"
+        return
+    }
+    $inner = "`$Host.UI.RawUI.WindowTitle='$Title'; " +
+        "Set-Location -LiteralPath '$WorkDir'; " +
+        "Write-Host '=== $Title ｜ 日志同时写入 $LogFile（Ctrl+C 停止服务）==='; " +
+        "$Command *>&1 | ForEach-Object { Write-Host `$_; Add-Content -Path '$LogFile' -Value `$_ -Encoding UTF8 }"
+    Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $inner
+}
+
 function Main {
     if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
 
@@ -83,6 +101,7 @@ function Main {
         cmd /c "docker compose stop >nul 2>&1"
         Pop-Location
         Write-Host "[OK] 容器已停止（数据保留；再次运行本脚本或 docker compose start 可恢复）"
+        Write-Host "[提示] 后端/前端日志窗口若仍开着（-NoExit 保留），直接关闭即可"
         return
     }
 
@@ -136,8 +155,9 @@ function Main {
     } elseif ($backendState -eq "foreign") {
         Write-Host "[FAIL] 端口 8001 被其他服务占用且 /health 不是本项目响应，请排查"; return
     } else {
-        $uvicornCmd = "cd /d `"$Backend`" && `"$PyExe`" -m uvicorn app.main:app --host 0.0.0.0 --port 8001 > `"$LogDir\uvicorn.log`" 2>&1"
-        Start-Hidden $uvicornCmd
+        $uvicornCmd = "`"$PyExe`" -m uvicorn app.main:app --host 0.0.0.0 --port 8001"
+        Start-ServiceWindow -Title "简历直达-后端(8001)" -WorkDir $Backend `
+            -Command $uvicornCmd -LogFile "$LogDir\uvicorn.log"
         $ready = $false
         for ($i = 0; $i -lt 30; $i += 2) {
             if ((Test-Backend) -eq "ours") { $ready = $true; break }
@@ -156,11 +176,12 @@ function Main {
             Push-Location $Frontend
             cmd /c "npm run build >nul 2>&1"
             Pop-Location
-            $feCmd = "cd /d `"$Frontend`" && npm run start > `"$LogDir\next.log`" 2>&1"
+            $feCmd = "npm run start"
         } else {
-            $feCmd = "cd /d `"$Frontend`" && npm run dev > `"$LogDir\next.log`" 2>&1"
+            $feCmd = "npm run dev"
         }
-        Start-Hidden $feCmd
+        Start-ServiceWindow -Title "简历直达-前端(3000)" -WorkDir $Frontend `
+            -Command $feCmd -LogFile "$LogDir\next.log"
         if (-not (Wait-Port 3000 "前端 Next.js" 60)) {
             Write-Host "[FAIL] 前端启动失败，日志: $LogDir\next.log"; return
         }
