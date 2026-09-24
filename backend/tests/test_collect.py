@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -87,6 +87,23 @@ def test_interval_guard_skips(session):
         assert adapter.calls == 1  # 未真实抓取
     finally:
         mp.undo()
+
+
+def test_interval_guard_handles_pg_aware_timestamps(session, monkeypatch):
+    """回归：PG 的 timestamptz 回 aware datetime，而 now 是 naive——两者混算直接 TypeError。
+
+    SQLite 只回 naive，容器级单测覆盖不到，故实测在 PG 上跑采集 CLI 才暴露
+    （间隔守卫整个跑不通）；这里把"最近一次成功采集时间"直接注入 aware 值复现。
+    """
+    adapter = FakeAdapter([make_norm("J1", "A")])
+    company = make_company(session)
+    monkeypatch.setattr("app.services.collect.get_adapter", lambda t, client=None: adapter)
+    aware = datetime(2026, 9, 16, 12, 0, 0, tzinfo=timezone.utc)  # PG 路径的真实形态
+    monkeypatch.setattr("app.services.collect._last_success_started_at", lambda s, c: aware)
+
+    r = collect_company(session, company, now=datetime(2026, 9, 16, 12, 30, 0))
+    assert r == {"company": company.slug, "status": "skipped", "reason": "interval_guard"}
+    assert adapter.calls == 0  # 守卫已拦下，未真实抓取
 
 
 def test_ttl_expires_stale_jobs(session):

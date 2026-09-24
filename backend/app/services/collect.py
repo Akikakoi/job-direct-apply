@@ -164,6 +164,23 @@ def cleanup_idle_jobs(
     return result
 
 
+def _as_naive(dt: datetime | None) -> datetime | None:
+    """统一成 naive UTC——SQLite 存 naive、PG 回 aware（timestamptz），混算会 TypeError。"""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
+def _last_success_started_at(session: Session, company: Company) -> datetime | None:
+    """该公司最近一次成功采集的开始时间（无则 None）。"""
+    return session.execute(
+        select(FetchLog.started_at)
+        .where(FetchLog.company_id == company.id, FetchLog.status == "success")
+        .order_by(FetchLog.started_at.desc())
+        .limit(1)
+    ).scalar()
+
+
 def collect_company(
     session: Session,
     company: Company,
@@ -174,16 +191,8 @@ def collect_company(
     now = now or datetime.utcnow()
     started = now
 
-    last_ok = (
-        session.execute(
-            select(FetchLog)
-            .where(FetchLog.company_id == company.id, FetchLog.status == "success")
-            .order_by(FetchLog.started_at.desc())
-        )
-        .scalars()
-        .first()
-    )
-    if last_ok is not None and last_ok.started_at >= now - timedelta(minutes=_interval_min(company)):
+    last_ok_started_at = _as_naive(_last_success_started_at(session, company))
+    if last_ok_started_at is not None and last_ok_started_at >= now - timedelta(minutes=_interval_min(company)):
         return {"company": company.slug, "status": "skipped", "reason": "interval_guard"}
 
     # Redis 令牌桶第二层（跨进程防双抓）；None = Redis 不可用，沿用 DB 守卫
