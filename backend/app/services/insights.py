@@ -34,6 +34,32 @@ def ndcg(relevances: list[float], k: int = 10) -> float:
     return round(dcg / idcg, 4) if idcg > 0 else 0.0
 
 
+def latest_outcomes(session: Session) -> dict[int, str]:
+    """每条投递的最新 outcome（feedback_log 按 id 升序 → 后写覆盖）。
+
+    调参（tuning.py）与质量报告共用同一"最新反馈"口径，避免两处漂移。
+    """
+    latest: dict[int, str] = {}
+    for fb in session.execute(select(FeedbackLog).order_by(FeedbackLog.id.asc())).scalars():
+        if fb.outcome and fb.application_id is not None:
+            latest[fb.application_id] = fb.outcome
+    return latest
+
+
+def weights_snapshot() -> dict:
+    """当前生效的匹配权重（看板展示 / 调参对照基线）。"""
+    from app.core.config import settings
+
+    return {
+        "skill": settings.match_w_skill,
+        "city": settings.match_w_city,
+        "exp": settings.match_w_exp,
+        "role": settings.match_w_role,
+        "alpha": settings.match_alpha,
+        "beta": settings.match_beta,
+    }
+
+
 def build_quality_report(session: Session, user_id: int | None = None, k: int = 10) -> dict:
     """汇总质量报告；user_id 限定单用户（默认全量）。"""
     apps_stmt = select(Application)
@@ -41,13 +67,7 @@ def build_quality_report(session: Session, user_id: int | None = None, k: int = 
         apps_stmt = apps_stmt.where(Application.user_id == user_id)
     apps = session.execute(apps_stmt).scalars().all()
 
-    # 每条投递取最新一条有 outcome 的反馈
-    latest: dict[int, str] = {}
-    for fb in session.execute(
-        select(FeedbackLog).order_by(FeedbackLog.id.asc())
-    ).scalars():
-        if fb.outcome and fb.application_id is not None:
-            latest[fb.application_id] = fb.outcome  # id 升序 → 后写覆盖
+    latest = latest_outcomes(session)
 
     outcome_counts = Counter(o for o in (latest.get(a.id) for a in apps) if o)
     responded = sum(outcome_counts.values())
@@ -102,4 +122,5 @@ def build_quality_report(session: Session, user_id: int | None = None, k: int = 
         "ndcg_at_k": round(sum(ndcgs) / len(ndcgs), 4) if ndcgs else None,
         "ndcg_resumes": len(ndcgs),
         "k": k,
+        "weights": weights_snapshot(),
     }
