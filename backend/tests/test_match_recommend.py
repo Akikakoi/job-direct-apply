@@ -77,6 +77,40 @@ def test_city_fit_contains_and_remote(session):
     assert compute_match(PROFILE, job_other)["explain"][1]["score"] == 0.0
 
 
+def test_city_fit_cross_region_neutral(session):
+    """§12.7 #9 C：跨区城市"不可比" → 0.5 中性，不再系统性压低海外。"""
+    job_sf = _add_job(session, "a", "San Francisco, CA", ["python"])
+    city = next(e for e in compute_match(PROFILE, job_sf)["explain"] if e["key"] == "city")
+    assert city["score"] == 0.5 and city["note"] == "cross_region_neutral"
+
+    # 反向对称：海外意向城市 vs 国内职位 → 同样中性
+    overseas_profile = dict(PROFILE, cities=["New York, NY"])
+    job_hz = _add_job(session, "b", "杭州", ["python"])
+    city2 = next(e for e in compute_match(overseas_profile, job_hz)["explain"] if e["key"] == "city")
+    assert city2["score"] == 0.5 and city2["note"] == "cross_region_neutral"
+
+    # 同区不同城市仍是 0（明确不匹配），不被"跨区中性"放宽
+    job_wlmq = _add_job(session, "c", "乌鲁木齐", ["python"])
+    assert compute_match(PROFILE, job_wlmq)["explain"][1]["score"] == 0.0
+
+
+def test_role_fit_bilingual(session):
+    """§12.7 #9 C：中英双向 role 同义词，跨语言 title 也能命中。"""
+    # 中文 target_role（后端）→ 英文 title
+    en_title = _add_job(session, "Senior Backend Engineer, Payments", "San Francisco, CA", ["python"])
+    assert compute_match(PROFILE, en_title)["explain"][3]["score"] == 1.0
+
+    # 英文 target_role → 中文 title（反查中文核心词）；ASCII 后缀"Engineer"需剥净
+    en_profile = dict(PROFILE, target_role="Backend Engineer")
+    zh_title = _add_job(session, "后端开发工程师（Java）", "杭州", ["python"])
+    role = next(e for e in compute_match(en_profile, zh_title)["explain"] if e["key"] == "role")
+    assert role["score"] == 1.0 and role["core"] == "后端"
+
+    # 英文 ↔ 英文：剥后缀后核心词命中（Backend Engineer vs Backend Developer）
+    en_dev = _add_job(session, "Backend Developer (Go)", "San Francisco, CA", ["python"])
+    assert compute_match(en_profile, en_dev)["explain"][3]["score"] == 1.0
+
+
 def test_exp_fit_ladder(session):
     ok = _add_job(session, "a", "杭州市", ["python"], exp_min=5)
     assert compute_match(PROFILE, ok)["explain"][2]["score"] == 1.0

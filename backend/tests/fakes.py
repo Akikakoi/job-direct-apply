@@ -12,6 +12,12 @@ GREENHOUSE_PAYLOAD = {
             "absolute_url": "https://job-boards.greenhouse.io/stripe/jobs/6606581",
             "location": {"name": "Tokyo, Japan"},
             "updated_at": "2026-09-10T12:00:00-04:00",
+            # content=true 时返回：实体转义后的 HTML（&lt;div&gt; …）
+            "content": (
+                "&lt;div class=&quot;content-intro&quot;&gt;&lt;h2&gt;Join us&lt;/h2&gt;"
+                "&lt;ul&gt;&lt;li&gt;Python &amp; Go&lt;/li&gt;&lt;li&gt;Kubernetes, AWS&lt;/li&gt;"
+                "&lt;/ul&gt;&lt;/div&gt;"
+            ),
         },
         {
             "id": 8023773,
@@ -19,6 +25,7 @@ GREENHOUSE_PAYLOAD = {
             "absolute_url": "https://job-boards.greenhouse.io/stripe/jobs/8023773",
             "location": {"name": "Remote, US"},
             "updated_at": "2026-09-14T09:30:00-04:00",
+            "content": None,  # 无全文：description 应为 None 而非空串
         },
     ]
 }

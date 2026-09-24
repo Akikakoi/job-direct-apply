@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from app.pipelines.match import compute_match, refresh_matches
-from app.pipelines.semantic import TfidfIndex, job_text, resume_query_text, tokenize
+from app.pipelines.semantic import (
+    TfidfIndex,
+    cross_lingual_tokens,
+    job_text,
+    resume_query_text,
+    tokenize,
+)
 from app.models import Job, MatchScore, Resume
 
 
@@ -14,6 +20,25 @@ def test_tokenize_mixed():
     assert "python" in toks
     assert "backend" in toks
     assert "后端" in toks and "端开" in toks and "开发" in toks  # CJK 2-gram
+
+
+def test_cross_lingual_bridge_tokens():
+    """§12.7 #9 C：术语桥双向补词，且 ASCII 侧按词边界匹配不误命中子串。"""
+    assert "backend" in tokenize("高级后端开发工程师")  # 中文术语 → 补英文写法
+    assert "后端" in tokenize("Senior Backend Engineer")  # 英文术语 → 补中文核心词
+    assert "web" not in tokenize("Build websites")  # 词边界："web" 不命中 "websites"
+    assert cross_lingual_tokens("") == []
+
+
+def test_cross_lingual_bridge_raises_overseas_similarity():
+    """中文简历 vs 英文 JD：桥接后语义分不再恒为 0，且相关 > 无关。"""
+    cn_resume = "后端开发工程师，熟悉 Python、MySQL、Redis，负责订单系统"
+    related = "Senior Backend Engineer - Python, MySQL, Redis. You will own our order platform."
+    unrelated = "Senior Brand Marketing Manager, Retail Campaigns"
+    idx = TfidfIndex().fit([related, unrelated])
+    q = idx.build_query(cn_resume)
+    assert idx.similarity(0, q) > 0  # 桥接生效（纯字面重叠时该值会趋近 0）
+    assert idx.similarity(0, q) > idx.similarity(1, q)
 
 
 def test_tfidf_similarity_related_vs_unrelated():

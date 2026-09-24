@@ -6,6 +6,10 @@
 - 中文不引分词器，用 CJK 2-gram + ASCII 单词混合 token（n-gram 是 ES
   同款思路），对"后端开发工程师 vs 服务端开发"这类字面重叠足够敏感。
 
+跨语言（§12.7 #9 遗留 C）：字面 token 之外再叠一张**中英岗位术语桥**（`_CROSS_LINGUAL`），
+把两侧对称投影到同一 token 空间，解决"中文简历 vs 英文 JD 语义分恒为 0"；零依赖、
+可离线测，神经多语模型留给 §7 二期 PGVector。
+
 切 PostgreSQL 后本模块接口不变，vector 计算可平滑替换为 BGE/PGVector。
 
 融合公式（§7 二期阉割版，γ*llm 留位）：
@@ -21,9 +25,78 @@ from collections import Counter
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 _ASCII_WORD = re.compile(r"[a-z0-9+#.]{2,}")
 
+# 跨语言术语桥（§12.7 #9 遗留 C）：中文简历 vs 英文 JD 的 TF-IDF 分近 0，因为
+# 两侧字面无重叠——CJK 2-gram 命不中 ASCII 词。这里用一张零依赖的中英岗位术语
+# 对照表把两侧**对称投影**到同一 token 空间：任一侧出现术语，就在 token 里补上
+# 对侧写法，使"中文简历里的 后端/算法/数据"能命中 "backend/algorithm/data"。
+#
+# 取舍（显式记录）：**不引入神经多语模型**（BGE-M3 等向量模型）——本模块的立身
+# 之本是"纯 Python、零依赖、离线可测"，神经多语模型是 §7 二期 PGVector 的升级
+# 路径；此表只覆盖岗位大类与高频域名词，长尾技术术语靠技能标签兜底（职位/简历
+# skills 已归一到同一套标准标签，本身即跨语言对齐的）。
+# 注入词一律为 ASCII 单词（无空格/连字符），与 `_ASCII_WORD` 的 token 形状一致。
+_CROSS_LINGUAL: dict[str, tuple[str, ...]] = {
+    "后端": ("backend", "server"),
+    "服务端": ("backend", "server"),
+    "前端": ("frontend", "web"),
+    "全栈": ("fullstack",),
+    "移动端": ("mobile", "android", "ios"),
+    "客户端": ("mobile", "client"),
+    "算法": ("algorithm", "algorithms"),
+    "机器学习": ("machine", "learning"),
+    "深度学习": ("neural", "learning"),
+    "数据": ("data", "analytics"),
+    "测试": ("testing", "qa"),
+    "运维": ("devops", "sre", "operations"),
+    "架构": ("architecture", "architect"),
+    "安全": ("security",),
+    "产品": ("product",),
+    "运营": ("operations", "growth"),
+    "市场": ("marketing",),
+    "销售": ("sales",),
+    "财务": ("finance", "accounting"),
+    "人力": ("human", "recruiting"),
+    "法务": ("legal", "compliance"),
+    "供应链": ("supply", "chain"),
+    "游戏": ("game", "gaming"),
+    "电商": ("ecommerce",),
+    "金融": ("fintech",),
+    "医疗": ("healthcare", "medical"),
+}
+
+
+def _build_reverse_index() -> list[tuple[re.Pattern[str], str]]:
+    """英文术语 → 中文核心词（反向桥）：同义词撞车时保留首个（如 server → 后端）。"""
+    pairs: dict[str, str] = {}
+    for zh, terms in _CROSS_LINGUAL.items():
+        for en in terms:
+            pairs.setdefault(en, zh)
+    # 词边界匹配：避免 "web" 命中 "website"、"qa" 命中 "qatar" 一类子串误判
+    return [
+        (re.compile(rf"(?<![a-z0-9]){en}(?![a-z0-9])"), zh) for en, zh in pairs.items()
+    ]
+
+
+_REVERSE_BRIDGE = _build_reverse_index()
+
+
+def cross_lingual_tokens(text: str) -> list[str]:
+    """跨语言桥补出的附加 token：中文术语 → 补英文写法；英文术语 → 补中文核心词。"""
+    if not text:
+        return []
+    lowered = text.lower()
+    extra: list[str] = []
+    for zh, terms in _CROSS_LINGUAL.items():
+        if zh in text:
+            extra.extend(terms)
+    for pattern, zh in _REVERSE_BRIDGE:
+        if pattern.search(lowered):
+            extra.append(zh)
+    return extra
+
 
 def tokenize(text: str) -> list[str]:
-    """混合 token：CJK 相邻 2-gram + ASCII 词（小写）。"""
+    """混合 token：CJK 相邻 2-gram + ASCII 词（小写）+ 跨语言术语桥补词。"""
     text = (text or "").lower()
     tokens: list[str] = []
     for word in _ASCII_WORD.findall(text):
@@ -35,6 +108,7 @@ def tokenize(text: str) -> list[str]:
             tokens.append(run)
         else:
             tokens.extend(run[i : i + 2] for i in range(len(run) - 1))
+    tokens.extend(cross_lingual_tokens(text))
     return tokens
 
 

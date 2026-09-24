@@ -115,6 +115,61 @@ def test_ttl_expires_stale_jobs(session):
     assert refreshed.status == "expired"
 
 
+def test_stale_timestamp_but_still_in_feed_keeps_active(session):
+    """回归：轮次内刷新过的职位不能被 cleanup_stale 误杀。
+
+    autoflush=False + 未 flush 时，cleanup_stale 的 SELECT 读不到本轮刚写的
+    updated_at，会把「在源里、只是上次采集很久以前」的职位整批置 expired
+    （实测 greenhouse 重采后 800 条全变 expired）。
+    """
+    adapter = FakeAdapter([make_norm("J1", "A")])
+    company = make_company(session)
+    job = Job(company_id=company.id, external_id="J1", title="A", apply_url="https://x.com/1",
+              source="fake", status="active")
+    session.add(job)
+    session.commit()
+    # updated_at 拨回 5 小时前（> TTL 180min），但本轮仍在源里 → 必须保持 active
+    session.execute(
+        Job.__table__.update().where(Job.id == job.id).values(updated_at=datetime.utcnow() - timedelta(hours=5))
+    )
+    session.commit()
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr("app.services.collect.get_adapter", lambda t, client=None: adapter)
+    try:
+        r = collect_company(session, company, now=datetime.utcnow())
+    finally:
+        mp.undo()
+
+    assert r["expired"] == 0
+    assert r["updated"] == 1
+    assert session.get(Job, job.id).status == "active"
+
+
+def test_expired_job_reappearing_in_feed_is_revived(session):
+    """回归：TTL 的语义是"源里已消失"，重新出现在源里必须复活为 active。
+
+    否则漏采/跳过一次超过 TTL 后，职位即使仍在源里也永远停在 expired
+    （实测 greenhouse 被误杀后 800 条无法自行恢复）。
+    """
+    adapter = FakeAdapter([make_norm("J1", "A")])
+    company = make_company(session)
+    job = Job(company_id=company.id, external_id="J1", title="A", apply_url="https://x.com/1",
+              source="fake", status="expired")
+    session.add(job)
+    session.commit()
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr("app.services.collect.get_adapter", lambda t, client=None: adapter)
+    try:
+        r = collect_company(session, company, now=datetime.utcnow())
+    finally:
+        mp.undo()
+
+    assert r["updated"] == 1 and r["expired"] == 0
+    assert session.get(Job, job.id).status == "active"
+
+
 def test_fetch_log_written(session):
     adapter = FakeAdapter([make_norm("J1", "A")])
     company = make_company(session)

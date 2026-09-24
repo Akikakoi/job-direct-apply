@@ -21,7 +21,15 @@ salary_min: number 期望月薪下限（单位 K）
 salary_max: number 期望月薪上限（单位 K）
 industry: string[] 期望行业
 edu_degree: "phd"|"master"|"bachelor"|"associate"
-不确定的字段直接省略，禁止编造。"""
+education: object[] 教育经历（按原文顺序），每项：
+  {school: 院校全称, major: 专业, degree: "phd"|"master"|"bachelor"|"associate",
+   start: "2024/09", end: "至今", highlights: string[] 主修课程/荣誉奖项}
+projects: object[] 项目经历（按原文顺序），每项：
+  {name: 项目名称, role: 担任角色, tech: string[] 该项目技术栈,
+   links: string[] 仓库/演示链接, description: 项目描述与亮点（≤200 字）}
+internships: object[] 实习/工作经历（按原文顺序），每项：
+  {company: 公司名称, title: 职位, start: 起, end: 止, description: 工作内容与成果（≤200 字）}
+不确定的字段直接省略，禁止编造；简历中没有对应内容的列表字段整体省略。"""
 
 
 class LLMNotConfigured(Exception):

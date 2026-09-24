@@ -74,7 +74,31 @@ def test_greenhouse_token_and_normalize():
     assert n.external_id == "6606581"
     assert n.city == "Tokyo, Japan"
     assert str(n.publish_date) == "2026-09-10"
+    # content 是实体转义 HTML：先 unescape 再剥标签（§12.7 #6 补采 description）
+    assert n.description == "Join us Python & Go Kubernetes, AWS"
+    # 无 content 的职位 → None（不是空串，避免被当成"有全文但抽不出标签"）
+    assert adapter.normalize_raw(fakes.greenhouse_raws()[1]).description is None
     assert n == adapter.normalize_raw(fakes.greenhouse_raws()[0])  # 幂等
+
+
+def test_greenhouse_discover_requests_content():
+    """discover 必须带 content=true，否则 greenhouse 全量无 description。"""
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return httpx.Response(200, json=fakes.GREENHOUSE_PAYLOAD)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = GreenhouseAdapter(client=client)
+    company = type("C", (), {
+        "slug": "stripe",
+        "feed_url": "https://boards-api.greenhouse.io/v1/boards/stripe/jobs",
+    })()
+    raws = adapter.discover(company)
+
+    assert len(raws) == 2
+    assert seen[0].params.get("content") == "true"
 
 
 def test_lever_slug_and_normalize():
