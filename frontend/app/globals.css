@@ -16,6 +16,11 @@
   padding: 0;
 }
 
+html {
+  /* 移动端：禁止横屏/字号被系统缩放放大导致布局错乱（§12.6 P5 ④） */
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -172,6 +177,31 @@ input[type="file"] {
   font-size: 13px;
 }
 
+.profile-block {
+  margin-top: 10px;
+}
+
+.profile-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.profile-item {
+  padding: 6px 0;
+  border-top: 1px dashed var(--line);
+}
+
+.profile-item:first-of-type {
+  border-top: none;
+}
+
+.profile-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .error {
   color: #dc2626;
   background: #fef2f2;
@@ -179,4 +209,164 @@ input[type="file"] {
   padding: 10px 12px;
   margin: 12px 0;
   font-size: 13px;
+}
+
+/* 质量看板（/insights） */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.metric {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.metric-value {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.metric-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 14px 0 6px;
+}
+
+.table-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-top: 1px dashed var(--line);
+  font-size: 13px;
+}
+
+.table-row:first-of-type {
+  border-top: none;
+}
+
+.mono {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+/* 招聘季柱状分布（§12.6 P5 ⑤） */
+.bars {
+  margin-top: 6px;
+}
+
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.bar-label {
+  flex: none;
+  width: 44px;
+  color: var(--muted);
+}
+
+.bar-track {
+  flex: 1;
+  height: 10px;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.bar {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+/* 旺季绿 / 淡季灰：与 .tag.ok / .tag.low 的语义色一致 */
+.bar.peak {
+  background: var(--ok);
+}
+
+.bar.off {
+  background: var(--line);
+}
+
+.bar-value {
+  flex: none;
+  width: 72px;
+  text-align: right;
+  color: var(--muted);
+}
+
+/* 语言开关（§12.6 P5 ⑤）：固定右上角，不占布局流；
+   按钮尺寸不受移动端 44px 触控规则约束（它不在主操作路径上） */
+.lang-switch {
+  position: fixed;
+  top: 10px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 20;
+}
+
+.lang-switch button {
+  min-height: 0;
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.lang-switch button.lang-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* 移动端适配（§12.6 P5 ④）：单列收窄留白、标题窄屏换行、触控目标 ≥44px、
+   底部留出 iPhone 安全区；桌面样式不受影响。 */
+@media (max-width: 640px) {
+  .container {
+    /* 顶部留出固定语言开关的高度，避免压住 h1 */
+    padding: 52px 12px calc(48px + env(safe-area-inset-bottom));
+  }
+
+  h1 {
+    font-size: 20px;
+  }
+
+  .card {
+    padding: 16px 14px;
+    border-radius: 10px;
+  }
+
+  /* 职位头（标题 + 分数）窄屏改为纵向排列，避免长标题被挤断 */
+  .job-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  /* 触控目标不小于 44px（iOS HIG / Material 最小点击区） */
+  button {
+    min-height: 44px;
+    padding: 10px 16px;
+  }
+
+  .metrics {
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  }
 }
