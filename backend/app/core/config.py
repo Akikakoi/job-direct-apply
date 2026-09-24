@@ -23,12 +23,21 @@ class Settings(BaseSettings):
     official_site_interval_min: int = 720   # 官网兜底更保守
     ttl_multiplier: int = 3                 # 连续 N 个采集周期未见更新 → expired
 
+    # §9 后台任务：异步化开关（默认关——开发期无 Redis/worker，走请求内同步）
+    resume_parse_async: bool = False        # 上传后异步解析（resume_parse_task）
+    match_async: bool = False               # 画像修改后异步重算（run_match_task）
+    idle_jobs_ttl_days: int = 14            # 每日全局 TTL 下架阈值（idle_jobs_cleanup）
+
     workday_max_total: int = 2000           # Workday 单站点单次搜索封顶
     workday_max_pages: int = 100            # 翻页安全上限（20/页 × 100 = 2000）
 
     # SmartRecruiters 详情补齐（N+1，默认关；开=每次采集最多补 sr_detail_cap 条）
     sr_fetch_details: bool = False
     sr_detail_cap: int = 200
+
+    # §12.7 #7 采集入库抽标签：词典扫描永远开（零成本）；LLM 兜底按成本开关（需 llm_api_key）
+    job_tag_llm: bool = False
+    job_tag_llm_cap: int = 50               # 每轮采集最多 LLM 抽取的职位数（成本上限）
 
     # P2 简历解析：LLM 抽取（DeepSeek / OpenAI 兼容接口）。key 为空走规则兜底
     llm_api_key: str = ""

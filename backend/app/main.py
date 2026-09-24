@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -15,6 +15,7 @@ from app.core.db import SessionLocal
 from app.models import Application, Company, Job, MatchScore, Resume
 from app.pipelines.match import refresh_matches
 from app.pipelines.parse import parse_resume_text
+from app.pipelines.rules import detect_lang
 from app.pipelines.text_extract import UnsupportedFile, extract_text
 from app.services.applications import IllegalTransition, scan_reminders, transition
 from app.services.city import city_match_variants
@@ -111,6 +112,37 @@ class ProfileUpdate(BaseModel):
     profile: dict
 
 
+def _enqueue(task_name: str, *args) -> bool:
+    """投递 Celery 任务（按任务名，避免 API 启动即加载 worker 模块）。
+
+    broker/worker 不可用（开发期常无 Redis）返回 False，由调用方降级为请求内同步，
+    保证「开了开关但没起 worker」不会静默丢任务（§9）。
+    """
+    try:
+        from app.workers.celery_app import celery_app
+
+        celery_app.send_task(task_name, args=list(args))
+        return True
+    except Exception:
+        return False
+
+
+def _activate_only(session: Session, user_id: int, keep_id: int) -> None:
+    """同用户 active 互斥：除 keep_id 外全部取消 active。"""
+    for other in session.execute(
+        select(Resume).where(Resume.user_id == user_id, Resume.id != keep_id)
+    ).scalars():
+        other.is_active = False
+
+
+def _parse_or_400(text: str, session: Session) -> dict:
+    """解析简历；文本为空等用户输入问题转 400（LLM/网络异常已在管道内兜底）。"""
+    try:
+        return parse_resume_text(text, session)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/resumes")
 async def upload_resume(
     file: UploadFile | None = File(default=None),
@@ -139,29 +171,53 @@ async def upload_resume(
     except UnsupportedFile as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    try:
-        profile = parse_resume_text(text, session)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # §9 resume_parse_task：开了异步开关时先入库占位（parse_status=pending），
+    # 投递成功即返回，解析交给 worker；投递失败（无 Redis/worker）降级为请求内同步。
+    pending = bool(settings.resume_parse_async)
+    profile = {"parse_status": "pending"} if pending else _parse_or_400(text, session)
 
     resume = Resume(
         user_id=user_id,
         file_path=saved_path,
         raw_text=text,
         profile=profile,
-        lang=profile.get("lang", "zh"),
+        lang=profile.get("lang") or detect_lang(text),
         is_active=True,  # 新上传自动成为该用户当前生效简历
     )
-    # 同用户其他简历取消 active
-    for other in session.execute(
-        select(Resume).where(Resume.user_id == user_id, Resume.id != resume.id, Resume.is_active.is_(True))
-    ).scalars():
-        other.is_active = False
     session.add(resume)
+    session.flush()  # 拿到 id 后再做 active 互斥，避免把新简历自己也取消
+    _activate_only(session, user_id, resume.id)
     session.commit()
+
+    parse_status = profile.get("parse_status", "done")
+    if pending and _enqueue("app.workers.celery_app.resume_parse_task", resume.id):
+        return {
+            "code": 0,
+            "data": {
+                "id": resume.id,
+                "profile": resume.profile,
+                "source": None,
+                "is_active": True,
+                "parse_status": "pending",
+            },
+            "message": "ok",
+        }
+    if pending:  # 投递失败：同一行改同步解析，行为与未开开关一致
+        profile = _parse_or_400(text, session)
+        resume.profile = profile
+        resume.lang = profile.get("lang") or resume.lang
+        session.commit()
+        parse_status = "done"
+
     return {
         "code": 0,
-        "data": {"id": resume.id, "profile": profile, "source": profile.get("source"), "is_active": True},
+        "data": {
+            "id": resume.id,
+            "profile": resume.profile,
+            "source": (resume.profile or {}).get("source"),
+            "is_active": True,
+            "parse_status": parse_status,
+        },
         "message": "ok",
     }
 
@@ -202,27 +258,51 @@ def activate_resume(resume_id: int, session: Session = Depends(get_session)) -> 
     resume = session.get(Resume, resume_id)
     if resume is None:
         raise HTTPException(status_code=404, detail="简历不存在")
-    for other in session.execute(
-        select(Resume).where(Resume.user_id == resume.user_id, Resume.id != resume.id)
-    ).scalars():
-        other.is_active = False
+    _activate_only(session, resume.user_id, resume.id)
     resume.is_active = True
     session.commit()
     return {"code": 0, "data": {"id": resume.id, "is_active": True}, "message": "ok"}
 
 
+def _remove_upload_file(file_path: str | None) -> bool:
+    """删除简历原件（§14 ① 个人信息删除：删库同时删盘，此前只删库行）。
+
+    只删 uploads_dir 内的文件：file_path 来自库内，仍做归属校验——历史脏数据或
+    人为改库可能指向目录外路径，不能因为"库里这么写"就删。删除失败（文件不存在/
+    被占用）不抛异常：删库行是主诉求，残留文件不应让删除接口整体失败。
+    """
+    if not file_path:
+        return False
+    try:
+        root = Path(settings.uploads_dir).resolve()
+        target = Path(file_path).resolve()
+        target.relative_to(root)  # 不在 uploads_dir 下 → ValueError，拒绝删除
+    except (ValueError, OSError):
+        return False
+    try:
+        target.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 @app.delete("/api/resumes/{resume_id}")
 def delete_resume(resume_id: int, session: Session = Depends(get_session)) -> dict:
-    """删除简历（连带 match_scores；上传原件文件保留在磁盘）。"""
+    """删除简历（连带 match_scores + 磁盘原件，§14 ① 个人信息删除口径）。"""
     resume = session.get(Resume, resume_id)
     if resume is None:
         raise HTTPException(status_code=404, detail="简历不存在")
     session.execute(
         delete(MatchScore).where(MatchScore.resume_id == resume.id)
     )
+    file_removed = _remove_upload_file(resume.file_path)
     session.delete(resume)
     session.commit()
-    return {"code": 0, "data": {"id": resume_id, "deleted": True}, "message": "ok"}
+    return {
+        "code": 0,
+        "data": {"id": resume_id, "deleted": True, "file_removed": file_removed},
+        "message": "ok",
+    }
 
 
 @app.get("/api/resumes/{resume_id}")
@@ -259,9 +339,16 @@ def update_resume_profile(
         if key in PROFILE_EDITABLE_KEYS:
             current[key] = value
     current["source"] = "manual"  # 人工修正标记，优先于解析结果
+    current["parse_status"] = "done"  # 人工修正即视为解析终态
     resume.profile = current
     session.commit()
-    # §12.3：profile 修改后触发重匹配（同步全量重算，规则打分轻量）
+    # §12.3：profile 修改后触发重匹配；§9 run_match_task 异步开关命中则交给 worker
+    if settings.match_async and _enqueue("app.workers.celery_app.run_match_task", resume.id):
+        return {
+            "code": 0,
+            "data": {"id": resume.id, "profile": current, "matches_refreshed": 0, "async": True},
+            "message": "ok",
+        }
     refreshed = refresh_matches(session, resume)
     return {
         "code": 0,
@@ -273,15 +360,58 @@ def update_resume_profile(
 # ---------- P2 推荐（§7） ----------
 
 
+# 国内/海外判定依据：netease（网易）是国内源；其余 ATS 源（greenhouse/lever/
+# ashby/workday/smartrecruiters）均为海外公司。实测库内该信号与城市信号完全一致
+# （netease 2629 条全为中文城市，ATS 源 1918 条全为非中文城市），且比 city 正则
+# 判定更可移植（不依赖 PG 专有正则，SQLite 同样可用）。新增国内源时在此登记。
+DOMESTIC_SOURCES = ("netease",)
+
+
+def _mix_regions(cn_rows: list, overseas_rows: list) -> list:
+    """国内/海外两路交错合并（方案 A，§12.7 #9）。
+
+    海外岗位此前被纯按 final_score 排序整体挤出默认列表（实测根因是"跨区城市
+    恒 0 + role 跨语言难命中"，不是缺 experience_min/degree_req——§12.7 #9 已
+    修正归因；该缺口由方案 C 收窄，交错仍是稳定曝光位的兜底）。两路各自已按分数
+    有序，按 1:1 严格交错即可保证海外有稳定曝光位；首个位置给分数更高的一路，
+    避免开头突兀。单区（region=cn/overseas）不走此逻辑。
+    """
+    if not cn_rows:
+        return list(overseas_rows)
+    if not overseas_rows:
+        return list(cn_rows)
+
+    def _score(row) -> float:
+        ms = row[0]
+        return float(ms.final_score if ms.final_score is not None else ms.rule_score or 0)
+
+    merged: list = []
+    i = j = 0
+    turn_cn = _score(cn_rows[0]) >= _score(overseas_rows[0])
+    while i < len(cn_rows) or j < len(overseas_rows):
+        if (turn_cn and i < len(cn_rows)) or j >= len(overseas_rows):
+            merged.append(cn_rows[i])
+            i += 1
+        else:
+            merged.append(overseas_rows[j])
+            j += 1
+        turn_cn = not turn_cn
+    return merged
+
+
 @app.get("/api/recommend")
 def recommend(
     resume_id: int,
     limit: int = 20,
     offset: int = 0,
     refresh: bool = False,
+    region: str = "all",  # all=全部 | cn=国内 | overseas=海外
     session: Session = Depends(get_session),
 ) -> dict:
     """可解释排序推荐：读 match_scores 缓存；无缓存或 refresh=true 时全量重算。"""
+    if region not in ("all", "cn", "overseas"):
+        raise HTTPException(status_code=422, detail="region 仅支持 all|cn|overseas")
+
     resume = session.get(Resume, resume_id)
     if resume is None:
         raise HTTPException(status_code=404, detail="简历不存在")
@@ -289,22 +419,43 @@ def recommend(
     cached = session.execute(
         select(func.count()).select_from(MatchScore).where(MatchScore.resume_id == resume.id)
     ).scalar_one()
-    if refresh or cached == 0:
+    # 异步解析未完成（§9）：此时 profile 是空占位，重算只会写入中性分，跳过等 worker
+    parsing = (resume.profile or {}).get("parse_status") == "pending"
+    if not parsing and (refresh or cached == 0):
         refresh_matches(session, resume)
+
+    where_clauses = [MatchScore.resume_id == resume.id, Job.status == "active"]
+    if region == "cn":
+        where_clauses.append(Job.source.in_(DOMESTIC_SOURCES))
+    elif region == "overseas":
+        # source 为 NULL 的脏数据归入海外，规避 NOT IN 遇 NULL 全部落空
+        where_clauses.append(or_(Job.source.is_(None), Job.source.notin_(DOMESTIC_SOURCES)))
 
     stmt = (
         select(MatchScore, Job)
         .join(Job, MatchScore.job_id == Job.id)
-        .where(MatchScore.resume_id == resume.id, Job.status == "active")
+        .where(*where_clauses)
         .order_by(MatchScore.final_score.desc(), MatchScore.rule_score.desc(), Job.updated_at.desc())
     )
     total = session.execute(
         select(func.count())
         .select_from(MatchScore)
         .join(Job, MatchScore.job_id == Job.id)
-        .where(MatchScore.resume_id == resume.id, Job.status == "active")
+        .where(*where_clauses)
     ).scalar_one()
-    rows = session.execute(stmt.limit(min(limit, 200)).offset(offset)).all()
+    window = min(limit, 200)
+    if region == "all":
+        # 方案 A：两路各取前 offset+window 条后交错，等价于全局交错排序的该窗口
+        fetch_n = offset + window
+        cn_rows = session.execute(
+            stmt.where(Job.source.in_(DOMESTIC_SOURCES)).limit(fetch_n)
+        ).all()
+        overseas_rows = session.execute(
+            stmt.where(or_(Job.source.is_(None), Job.source.notin_(DOMESTIC_SOURCES))).limit(fetch_n)
+        ).all()
+        rows = _mix_regions(cn_rows, overseas_rows)[offset : offset + window]
+    else:
+        rows = session.execute(stmt.limit(window).offset(offset)).all()
     return {
         "code": 0,
         "data": {
@@ -337,6 +488,8 @@ class ApplicationCreate(BaseModel):
     resume_id: int | None = None
     job_id: int
     authorized: bool  # 合规钩子：用户确认授权投递
+    # §14 ② 同意留痕：前端投递确认弹层展示的政策版本（未带=服务端按当前版本补记）
+    consent_version: str | None = None
 
 
 class StatusUpdate(BaseModel):
@@ -348,9 +501,21 @@ class StatusUpdate(BaseModel):
 def create_application(
     body: ApplicationCreate, session: Session = Depends(get_session)
 ) -> dict:
-    """创建投递记录（直达链接模式）。authorized=false 拒绝（§4 合规钩子）。"""
+    """创建投递记录（直达链接模式）。authorized=false 拒绝（§4 合规钩子）。
+
+    §14 ②：授权必须留痕——记 `authorized_at` 与 `consent_version`。前端展示的政策版本与
+    服务端当前版本不一致时按 400 拒绝（用户在旧政策页上同意的内容不能算作对新版同意），
+    服务端调用未带版本时按当前版本补记（app/services/legal.py 口径）。
+    """
+    from app.services.legal import POLICY_VERSION, consent_version_ok
+
     if not body.authorized:
         raise HTTPException(status_code=403, detail="投递需用户授权（authorized=true）")
+    if not consent_version_ok(body.consent_version):
+        raise HTTPException(
+            status_code=400,
+            detail=f"政策版本不一致（收到 {body.consent_version}，当前 {POLICY_VERSION}），请刷新页面重新确认",
+        )
     job = session.get(Job, body.job_id)
     if job is None or job.status != "active":
         raise HTTPException(status_code=404, detail="职位不存在或已失效")
@@ -375,6 +540,9 @@ def create_application(
         mode="direct_link",  # 半自动帮填（semi_auto）为 P3 后半
         status="submitted",
         apply_url=job.apply_url,
+        authorized=True,  # §14 ② 走到这里必已 authorized=true，显式落库便于审计
+        authorized_at=datetime.utcnow(),
+        consent_version=body.consent_version or POLICY_VERSION,
     )
     session.add(app_row)
     session.commit()
@@ -384,6 +552,8 @@ def create_application(
             "id": app_row.id,
             "status": app_row.status,
             "apply_url": app_row.apply_url,
+            "authorized_at": str(app_row.authorized_at),
+            "consent_version": app_row.consent_version,
         },
         "message": "ok",
     }
@@ -419,6 +589,10 @@ def list_applications(
                     "city": job.city,
                     "status": app.status,
                     "apply_url": app.apply_url or job.apply_url,
+                    # §14 ② 同意留痕：授权状态/时间/政策版本（历史行可能为 null，如实透出）
+                    "authorized": bool(app.authorized),
+                    "authorized_at": str(app.authorized_at) if app.authorized_at else None,
+                    "consent_version": app.consent_version,
                     "created_at": str(app.created_at),
                     "updated_at": str(app.updated_at),
                 }
@@ -596,6 +770,145 @@ def quality_insights(
     return {"code": 0, "data": report, "message": "ok"}
 
 
+@app.get("/api/insights/tuning")
+def tuning_insights(
+    k: int = 10,
+    step: float = Query(0.1, ge=0.05, le=0.5),
+    top: int = 5,
+    session: Session = Depends(get_session),
+) -> dict:
+    """权重回归调参建议：在权重网格上搜索 NDCG@k 最优（只读，不写配置）。
+
+    step 表示权重网格粒度（越小越细但组合数指数上升）；越界返回 422。
+    """
+    from app.services.tuning import search_weights
+
+    report = search_weights(session, k=k, step=step, top=top)
+    return {"code": 0, "data": report, "message": "ok"}
+
+
+# ---------- P5 ① 市场洞察报告（§12.6） ----------
+
+
+@app.get("/api/insights/market")
+def market_insights(
+    region: str = "all",
+    top: int = Query(10, ge=1, le=50),
+    min_sample: int = Query(3, ge=1, le=100),
+    months: int = Query(12, ge=1, le=36),
+    session: Session = Depends(get_session),
+) -> dict:
+    """城市/技能/薪资趋势（脱敏聚合：分桶计数 < min_sample 不单独输出）。"""
+    if region not in ("all", "cn", "overseas"):
+        raise HTTPException(status_code=422, detail="region 仅支持 all|cn|overseas")
+    from app.services.market import market_report
+
+    report = market_report(session, region=region, top=top, min_sample=min_sample, months=months)
+    return {"code": 0, "data": report, "message": "ok"}
+
+
+# ---------- P5 ② 面试陪伴闭环（§12.6） ----------
+
+
+class InterviewAtUpdate(BaseModel):
+    interview_at: datetime | None = None
+
+
+@app.get("/api/applications/{application_id}/interview-kit")
+def interview_kit(application_id: int, session: Session = Depends(get_session)) -> dict:
+    """面试陪伴包：准备清单 + 技能考察点 + 公司背景包（规则推导，离线可算）。"""
+    app_row = session.get(Application, application_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="投递记录不存在")
+    from app.services.interview import build_interview_kit
+
+    return {"code": 0, "data": build_interview_kit(session, app_row), "message": "ok"}
+
+
+@app.put("/api/applications/{application_id}/interview-at")
+def update_interview_at(
+    application_id: int, body: InterviewAtUpdate, session: Session = Depends(get_session)
+) -> dict:
+    """登记/清空面试时间（终态 400）；登记后进入 beat 的面试催进窗口。"""
+    app_row = session.get(Application, application_id)
+    if app_row is None:
+        raise HTTPException(status_code=404, detail="投递记录不存在")
+    from app.services.interview import set_interview_at
+
+    try:
+        app_row = set_interview_at(session, app_row, body.interview_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "code": 0,
+        "data": {
+            "id": app_row.id,
+            "status": app_row.status,
+            "interview_at": str(app_row.interview_at) if app_row.interview_at else None,
+        },
+        "message": "ok",
+    }
+
+
+@app.get("/api/interview-reminders")
+def interview_reminders(
+    user_id: int | None = None,
+    within_days: int = Query(2, ge=0, le=30),
+    session: Session = Depends(get_session),
+) -> dict:
+    """面试催进扫描（平台内查询式，与 beat 的 interview_reminder_task 同源）。"""
+    from app.services.interview import scan_interview_reminders
+
+    items = scan_interview_reminders(session, within_days=within_days, user_id=user_id)
+    return {"code": 0, "data": {"total": len(items), "items": items}, "message": "ok"}
+
+
+# ---------- P5 ③ AI 简历优化（§12.6） ----------
+
+
+class OptimizeRequest(BaseModel):
+    job_id: int
+    use_llm: bool = False  # LLM 兜底默认关（规则为主；开启且未配 key 也只在 llm.status 标注）
+
+
+@app.post("/api/resumes/{resume_id}/optimize")
+def optimize_resume(
+    resume_id: int, body: OptimizeRequest, session: Session = Depends(get_session)
+) -> dict:
+    """对照目标 JD 逐条差距 + 改写建议（规则推导离线可算，LLM 为可选兜底）。"""
+    resume = session.get(Resume, resume_id)
+    if resume is None:
+        raise HTTPException(status_code=404, detail="简历不存在")
+    job = session.get(Job, body.job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="职位不存在")
+    from app.services.optimize import build_optimization
+
+    return {"code": 0, "data": build_optimization(resume, job, use_llm=body.use_llm), "message": "ok"}
+
+
+# ---------- P5 ⑤ 招聘季适配 + 多语言看板（§12.6） ----------
+
+
+@app.get("/api/insights/seasonality")
+def seasonality_insights(
+    region: str = "all",
+    lang: str = "zh-CN",
+    min_sample: int = Query(3, ge=1, le=100),
+    session: Session = Depends(get_session),
+) -> dict:
+    """招聘季画像：月份/季度分布 + 当前冷热与建议（标签按 lang 渲染）。"""
+    if region not in ("all", "cn", "overseas"):
+        raise HTTPException(status_code=422, detail="region 仅支持 all|cn|overseas")
+    from app.services.i18n import SUPPORTED_LANGS
+    from app.services.seasonality import seasonality_report
+
+    if lang not in SUPPORTED_LANGS:
+        raise HTTPException(status_code=422, detail="lang 仅支持 zh-CN|en")
+    report = seasonality_report(session, region=region, lang=lang, min_sample=min_sample)
+    return {"code": 0, "data": report, "message": "ok"}
+
+
 @app.post("/api/applications/{application_id}/autofill")
 def autofill_application(
     application_id: int, session: Session = Depends(get_session)
@@ -624,3 +937,50 @@ def autofill_application(
         "data": {"application_id": application_id, "status": "launched", "apply_url": apply_url},
         "message": "浏览器已打开，请人工核对后手动提交",
     }
+
+
+# ---------- §14 上线合规：政策版本 + 投递告知（法务最小实现） ----------
+
+
+@app.get("/api/legal/policies")
+def legal_policies() -> dict:
+    """政策版本/生效日 + 投递前告知文案（前端 `/legal/*` 与投递确认弹层的单一事实源）。
+
+    政策正文在前端静态页；后端给版本与告知要点，供 `POST /api/applications` 的
+    `consent_version` 留痕比对（口径见 app/services/legal.py）。
+    """
+    from app.services.legal import policies_payload
+
+    return {"code": 0, "data": policies_payload(), "message": "ok"}
+
+
+@app.get("/api/compliance/audit")
+def compliance_audit(session: Session = Depends(get_session)) -> dict:
+    """采集 robots/terms 合规审计表（逐公司结论 + 证据 + 复核日期 + 覆盖缺口）。
+
+    审计行是代码内数据（`app/services/compliance.py` AUDIT_ROWS），接口只做
+    "库内公司 × 审计表"的覆盖比对：**未有审计行的公司单列在 `unreviewed`**——新增公司
+    必须先补审计行再开采集（§5.2 合规前置），这条靠接口/用例兜住而不是靠人记。
+    """
+    from app.services.compliance import audit_report
+
+    return {"code": 0, "data": audit_report(session), "message": "ok"}
+
+
+# ---------- §14 ④ 上线监控看板：采集成功率 / 任务积压 / 命中率基线 ----------
+
+
+@app.get("/api/insights/ops")
+def ops_insights(
+    hours: int = Query(24, ge=1, le=720),
+    k: int = Query(10, ge=1, le=50),
+    session: Session = Depends(get_session),
+) -> dict:
+    """运维监控看板：采集成功率 / 任务积压 / 命中率基线 + 告警（口径见 services/ops.py）。
+
+    只读聚合，不触网：Redis 不可用时队列口径降级为 available=false（不拿 0 冒充健康）。
+    hours 越界返回 422。
+    """
+    from app.services.ops import ops_report
+
+    return {"code": 0, "data": ops_report(session, hours=hours, k=k), "message": "ok"}

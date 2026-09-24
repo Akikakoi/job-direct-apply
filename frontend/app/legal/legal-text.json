@@ -1,0 +1,261 @@
+{
+  "_comment": "法务正文单一事实源（§14 ①）：中英逐条对照，由 /legal/terms 与 /legal/privacy 渲染。改正文只改这里——版本号在 legal-doc.js（与后端 legal.POLICY_VERSION 契约断言）；加/删小节必须中英同步，scripts/export_legal_text.py 与 tests/test_legal.py 会拒收结构不对齐或英文残留中文的稿子。",
+  "meta": {
+    "authoritative_lang": "zh",
+    "legal_review": {
+      "signed_version": "",
+      "reviewer": "",
+      "reviewed_at": ""
+    }
+  },
+  "disclaimer": {
+    "zh": "正文为中英对照：中文版本为解释依据，英文版本为参考译文。",
+    "en": "The Chinese and English texts are provided together; the Chinese version prevails as the authoritative text and the English version is a reference translation."
+  },
+  "terms": {
+    "zh": [
+      {
+        "id": "service",
+        "h": "一、服务说明",
+        "body": [
+          { "p": "「简历直达」聚合企业官方招聘系统（ATS）公开发布的职位信息，向你提供基于简历画像的可解释排序推荐，并帮助你跳转到用人单位的官方申请页完成投递。" },
+          { "p": "平台不是招聘方，不参与录用决策；职位信息以用人单位官方页面为准，平台不对 ATS 站点的内容、可用性及招录结果作出承诺。" }
+        ]
+      },
+      {
+        "id": "authorization",
+        "h": "二、授权范围",
+        "body": [
+          { "p": "你在发起投递前需显式勾选授权。授权的范围仅限于：**按你的操作指令**生成投递记录、保存职位与简历画像的对应关系、跟踪你在平台内登记的投递状态。" },
+          {
+            "ul": [
+              "平台不代填密码，不绕过登录、验证码或任何反爬措施；",
+              "平台不替你点击「提交」，最终提交动作始终由你在第三方招聘系统内本人完成；",
+              "平台不会以你的名义向任何第三方发送简历、邮件或站内信。"
+            ]
+          },
+          { "p": "半自动帮填功能仅在本地浏览器中预填公开表单字段（姓名/邮箱/电话），打开页面后由你人工核对并自行提交。" }
+        ]
+      },
+      {
+        "id": "user_duty",
+        "h": "三、用户责任",
+        "body": [
+          { "p": "你应保证上传的简历内容真实、准确、不含违法信息，并确保你有权使用其中的个人信息。因简历内容虚假或侵犯第三方权益产生的后果，由你自行承担。" },
+          { "p": "你应自行核对第三方招聘系统的表单与投递结果；平台内的「已投递」标记仅为你的自助记录，不代表用人单位已收到投递。" }
+        ]
+      },
+      {
+        "id": "personal_info",
+        "h": "四、个人信息与删除",
+        "body": [
+          { "p": "平台对个人信息的收集与使用规则见《隐私政策》。你可以随时删除简历与投递记录以撤回授权，删除方式与影响范围在《隐私政策》第三节说明。" }
+        ]
+      },
+      {
+        "id": "changes",
+        "h": "五、协议变更",
+        "body": [
+          { "p": "协议更新时平台会同时更新版本号与生效日；你在新版本生效后继续使用服务，视为接受更新后的协议。重大变更会要求你在投递前重新确认。" }
+        ]
+      },
+      {
+        "id": "contact",
+        "h": "六、联系方式",
+        "body": [
+          { "p": "对本协议或平台行为有异议，可通过平台运营方公布的联系方式提出；我们将在合理期限内答复并处理。" }
+        ]
+      }
+    ],
+    "en": [
+      {
+        "id": "service",
+        "h": "1. Scope of Service",
+        "body": [
+          { "p": "Resume Direct aggregates job postings published publicly by employers' official applicant tracking systems (ATS), offers you explainable ranking recommendations based on your resume profile, and helps you reach the employer's official application page to complete your application." },
+          { "p": "The Platform is not a recruiter and takes no part in hiring decisions. Job information is governed by the employer's official page; the Platform makes no commitment regarding the content or availability of ATS sites, or the outcome of any application." }
+        ]
+      },
+      {
+        "id": "authorization",
+        "h": "2. Scope of Authorization",
+        "body": [
+          { "p": "You must explicitly tick the authorization box before starting an application. The authorization is limited to: creating an application record **at your instruction**, storing the link between the job and your resume profile, and tracking the application status you record on the Platform." },
+          {
+            "ul": [
+              "The Platform does not fill in passwords for you, and does not bypass logins, CAPTCHAs, or any anti-scraping measure;",
+              "The Platform does not click “Submit” for you — the final submission is always made by you personally within the third-party recruiting system;",
+              "The Platform does not send resumes, emails, or in-app messages to any third party in your name."
+            ]
+          },
+          { "p": "The semi-automatic form-filling feature only pre-fills public form fields (name / email / phone) in your local browser; you review the page yourself and submit it manually." }
+        ]
+      },
+      {
+        "id": "user_duty",
+        "h": "3. Your Responsibilities",
+        "body": [
+          { "p": "You must ensure that any resume you upload is truthful, accurate, and free of unlawful content, and that you have the right to use the personal information it contains. You bear the consequences of a resume that is false or infringes third-party rights." },
+          { "p": "You should verify the forms and submission results on the third-party recruiting system yourself. The “applied” marker on the Platform is your own record only and does not mean that the employer has received your application." }
+        ]
+      },
+      {
+        "id": "personal_info",
+        "h": "4. Personal Information and Deletion",
+        "body": [
+          { "p": "How the Platform collects and uses personal information is described in the Privacy Policy. You may delete your resume and application records at any time to withdraw your authorization; the methods and consequences of deletion are set out in Section 3 of the Privacy Policy." }
+        ]
+      },
+      {
+        "id": "changes",
+        "h": "5. Changes to These Terms",
+        "body": [
+          { "p": "When these Terms are updated, the Platform updates the version number and the effective date together. Continuing to use the service after a new version takes effect means you accept the updated Terms. Material changes will require you to confirm again before applying." }
+        ]
+      },
+      {
+        "id": "contact",
+        "h": "6. Contact",
+        "body": [
+          { "p": "If you object to these Terms or to the Platform's conduct, you may raise it through the contact details published by the Platform operator; we will reply and handle it within a reasonable period." }
+        ]
+      }
+    ]
+  },
+  "privacy": {
+    "zh": [
+      {
+        "id": "minimal",
+        "h": "一、最小必要的信息收集",
+        "body": [
+          { "p": "平台只收集实现「推荐 + 投递跟进」所必需的信息，不收集与服务无关的数据：" },
+          {
+            "ul": [
+              "**简历内容**：你主动上传的简历文件或粘贴的文本，以及由此解析出的画像字段（技能、经验年限、学历、意向岗位与城市、期望薪资）；",
+              "**投递记录**：你标记或发起的职位、投递状态与时间、面试时间（如你登记）、授权时间与所同意的协议版本；",
+              "**采集数据**：企业官方招聘系统公开发布的职位信息，不含任何个人数据。"
+            ]
+          },
+          { "p": "平台不收集身份证号、银行卡、健康、生物特征等敏感个人信息，也不读取你设备上的其他文件；不向第三方购买个人信息。" }
+        ]
+      },
+      {
+        "id": "sharing",
+        "h": "二、使用与共享（授权范围）",
+        "body": [
+          { "p": "简历画像仅用于为你生成职位匹配分与推荐排序、生成改进提示与面试准备建议。除以下情形外不向第三方共享：" },
+          {
+            "ul": [
+              "你主动跳转到用人单位官方招聘系统并自行提交时，表单中填写的信息由你本人提供、由该站点按其隐私政策处理；",
+              "依法律法规或监管要求必须提供时。"
+            ]
+          },
+          { "p": "平台不使用简历数据训练对外模型，不向任何第三方售卖或出租个人信息；对外发布的市场洞察报告为匿名聚合口径（小样本分桶按 k-匿名截断），不含公司名与个人数据。" }
+        ]
+      },
+      {
+        "id": "deletion",
+        "h": "三、个人信息的删除与撤回",
+        "body": [
+          { "p": "你可以随时自助删除，无需申请与等待：" },
+          {
+            "ul": [
+              "**删除简历**：删除后，该简历及由它产生的匹配分记录一并删除，**服务器上留存的简历原件文件同时删除**，不再用于任何推荐；",
+              "**删除投递记录**：删除后平台不再跟踪该投递，也不基于其生成提醒；",
+              "撤回授权即停止后续投递行为，已提交给用人单位的投递需你自行联系对方处理。"
+            ]
+          },
+          { "p": "删除操作不可撤销；如遇删除失败或需要批量清理，可通过联系方式提出，我们将在合理期限内完成。" }
+        ]
+      },
+      {
+        "id": "security",
+        "h": "四、存储与安全",
+        "body": [
+          { "p": "个人信息存储于平台服务器，简历原件与画像数据仅对你的账号（当前为单用户形态）可见。平台采取访问控制与最小权限原则；**简历原件的加密存储（KMS/应用层 AES）尚未实现**，上线前需完成，故当前部署仅限本人使用与联调环境。" }
+        ]
+      },
+      {
+        "id": "minors",
+        "h": "五、未成年人",
+        "body": [
+          { "p": "本服务面向求职场景的成年人；若你未满 18 周岁，请在监护人指导下使用，或不要上传含个人信息的简历。" }
+        ]
+      },
+      {
+        "id": "contact",
+        "h": "六、联系方式",
+        "body": [
+          { "p": "对个人信息处理有疑问、投诉或需要行使查阅/更正/删除权利，可通过平台运营方公布的联系方式提出。" }
+        ]
+      }
+    ],
+    "en": [
+      {
+        "id": "minimal",
+        "h": "1. Data Minimization: What We Collect",
+        "body": [
+          { "p": "The Platform collects only the information necessary to provide recommendations and to follow up on applications, and collects no data unrelated to the service:" },
+          {
+            "ul": [
+              "**Resume content**: the resume file you upload or the text you paste, and the profile fields parsed from it (skills, years of experience, education, target role and city, expected salary);",
+              "**Application records**: the jobs you mark or apply for, application status and timestamps, interview time (if you record it), the time of authorization, and the policy version you consented to;",
+              "**Collected data**: job postings published publicly by employers' official applicant tracking systems, containing no personal data."
+            ]
+          },
+          { "p": "The Platform does not collect sensitive personal information such as ID numbers, bank card numbers, health data, or biometric data, does not read other files on your device, and does not buy personal information from third parties." }
+        ]
+      },
+      {
+        "id": "sharing",
+        "h": "2. Use and Sharing (Scope of Authorization)",
+        "body": [
+          { "p": "Your resume profile is used only to generate job match scores and recommendation rankings for you, and to produce improvement tips and interview preparation suggestions. It is not shared with third parties except in the following cases:" },
+          {
+            "ul": [
+              "when you follow a link to an employer's official recruiting system and submit the form yourself, the information you enter is provided by you and processed by that site under its own privacy policy;",
+              "when disclosure is required by laws, regulations, or a regulator."
+            ]
+          },
+          { "p": "The Platform does not use resume data to train external models and does not sell or rent personal information to any third party. Published market insight reports use anonymized aggregate figures (small buckets are truncated by k-anonymity) and contain neither company names nor personal data." }
+        ]
+      },
+      {
+        "id": "deletion",
+        "h": "3. Deletion of Personal Information and Withdrawal of Consent",
+        "body": [
+          { "p": "You can delete your data yourself at any time, with no application and no waiting period:" },
+          {
+            "ul": [
+              "**Delete a resume**: the resume and the match scores generated from it are deleted together, and **the original uploaded resume file stored on the server is deleted at the same time**, and is no longer used for any recommendation;",
+              "**Delete an application record**: the Platform stops tracking that application and stops generating reminders based on it;",
+              "withdrawing authorization stops any further application activity; applications already submitted to an employer must be handled by you directly with that employer."
+            ]
+          },
+          { "p": "Deletion cannot be undone. If deletion fails or you need a bulk cleanup, raise it through the contact details and we will complete it within a reasonable period." }
+        ]
+      },
+      {
+        "id": "security",
+        "h": "4. Storage and Security",
+        "body": [
+          { "p": "Personal information is stored on the Platform's servers, and resume originals and profile data are visible only to your account (a single-user setup at present). The Platform applies access control and the principle of least privilege. **Encrypted storage of resume originals (KMS or application-layer AES) is not yet implemented** and must be completed before launch, so the current deployment is limited to your own use and integration testing." }
+        ]
+      },
+      {
+        "id": "minors",
+        "h": "5. Minors",
+        "body": [
+          { "p": "This service is intended for adults in job-seeking situations. If you are under 18, please use it under the guidance of a guardian, or do not upload a resume containing personal information." }
+        ]
+      },
+      {
+        "id": "contact",
+        "h": "6. Contact",
+        "body": [
+          { "p": "If you have questions or complaints about how personal information is handled, or wish to exercise your rights to access, correct, or delete it, you may raise it through the contact details published by the Platform operator." }
+        ]
+      }
+    ]
+  }
+}

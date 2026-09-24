@@ -25,7 +25,34 @@ $Backend   = Join-Path $Root "backend"
 $Frontend  = Join-Path $Root "frontend"
 $LogDir    = Join-Path $Root "logs"
 $PyExe     = Join-Path $Root ".venv\Scripts\python.exe"
-$DockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+
+# Docker Desktop 主程序路径：机器级安装落在 Program Files，用户级安装会落到
+# LOCALAPPDATA\Programs\DockerDesktop（本机实测），故多候选探测 + 从 docker CLI
+# 位置反推，避免硬编码路径导致"未找到 Docker Desktop"而无法启动数据库。
+function Resolve-DockerDesktop {
+    $candidates = @()
+    if ($env:ProgramFiles) {
+        $candidates += (Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe")
+    }
+    if (${env:ProgramFiles(x86)}) {
+        $candidates += (Join-Path ${env:ProgramFiles(x86)} "Docker\Docker\Docker Desktop.exe")
+    }
+    if ($env:LOCALAPPDATA) {
+        $candidates += (Join-Path $env:LOCALAPPDATA "Programs\DockerDesktop\Docker Desktop.exe")
+    }
+    foreach ($p in $candidates) {
+        if (Test-Path $p) { return $p }
+    }
+    # 兜底：从 docker CLI 反推（<...>\DockerDesktop\resources\bin\docker.exe 上溯 3 级）
+    $cli = (Get-Command docker.exe -ErrorAction SilentlyContinue).Source
+    if ($cli) {
+        $root = Split-Path (Split-Path (Split-Path $cli -Parent) -Parent) -Parent
+        $exe = Join-Path $root "Docker Desktop.exe"
+        if (Test-Path $exe) { return $exe }
+    }
+    return $null
+}
+$DockerExe = Resolve-DockerDesktop
 
 function Test-Port([int]$Port) {
     $c = New-Object Net.Sockets.TcpClient
@@ -112,7 +139,7 @@ function Main {
     if ($LASTEXITCODE -eq 0) { $dockerOk = $true }
 
     if (-not $dockerOk) {
-        if (Test-Path $DockerExe) {
+        if ($DockerExe -and (Test-Path $DockerExe)) {
             Write-Host "[..] 启动 Docker Desktop（首次冷启动约 30-90s）..."
             Start-Process $DockerExe -WindowStyle Hidden
             for ($i = 0; $i -lt 90; $i += 3) {
@@ -121,7 +148,7 @@ function Main {
                 if ($LASTEXITCODE -eq 0) { $dockerOk = $true; break }
             }
         } else {
-            Write-Host "[FAIL] 未找到 Docker Desktop（$DockerExe）"
+            Write-Host "[FAIL] 未找到 Docker Desktop，请确认已安装（或手动启动后重跑本脚本）"
         }
     }
     if (-not $dockerOk) { Write-Host "[FAIL] Docker 引擎不可用，无法启动数据库"; return }
