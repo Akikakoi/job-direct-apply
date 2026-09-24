@@ -8,6 +8,9 @@ profile 结构（§6）：
   "skills": [...], "experience_years": int, "target_role": str,
   "cities": [...], "salary_min": K, "salary_max": K,
   "industry": [...], "edu_degree": "bachelor|master|phd|associate",
+  "education": [{"school", "major", "degree", "start", "end", "highlights": [...]}],
+  "projects": [{"name", "role", "tech": [...], "links": [...], "description"}],
+  "internships": [{"company", "title", "start", "end", "description"}],
   "lang": "zh|en", "source": "llm|rules", "notes": [...]
 }
 """
@@ -63,10 +66,16 @@ def parse_resume_text(raw_text: str, session, use_llm: bool | None = None) -> di
 
     profile = validate_profile(llm_profile, rule_profile, notes) if llm_profile else dict(rule_profile)
 
-    # skills 归一到 skill_tags 字典口径（§6 口径统一）：LLM 技能 ∪ 词典扫描命中
+    # skills 归一到 skill_tags 字典口径（§6 口径统一）：
+    # LLM 技能 ∪ 词典扫描命中 ∪ 项目技术栈（项目里用到的技术同样是技能信号）
     llm_skills = list(profile.get("skills") or [])
     scanned = list(rule_profile.get("skills") or [])
-    profile["skills"] = canonicalize_skills(llm_skills + scanned, alias_map)
+    project_tech = [
+        str(tech)
+        for proj in (profile.get("projects") or [])
+        for tech in (proj.get("tech") or [])
+    ]
+    profile["skills"] = canonicalize_skills(llm_skills + scanned + project_tech, alias_map)
 
     profile["source"] = source
     profile["lang"] = rule_profile.get("lang", "zh")

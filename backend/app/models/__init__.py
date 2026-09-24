@@ -156,7 +156,13 @@ class Application(Base):
     apply_url: Mapped[str | None] = mapped_column(Text)
     external_ref: Mapped[str | None] = mapped_column(Text)
     authorized: Mapped[bool] = mapped_column(Boolean, default=False)
+    # §14 ② 同意留痕：授权时间 + 所同意的政策版本（app/services/legal.py 的 POLICY_VERSION）。
+    # 可空：0003 迁移前的历史行没有留痕，如实为"未知"而不回填假数据。
+    authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consent_version: Mapped[str | None] = mapped_column(Text)
     supplier_new: Mapped[str | None] = mapped_column(Text)
+    # §12.6 P5 ② 面试时间（用户登记，可空）：面试陪伴的定时催进据此触发
+    interview_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

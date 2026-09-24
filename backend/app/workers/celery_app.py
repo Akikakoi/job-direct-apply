@@ -5,6 +5,9 @@
   与 docker-compose.yml 暴露的 Redis 一致）；
 - beat 每 30 分钟 tick 一次 collect_jobs_task；collect_all 内部有公司级
   interval_min 间隔守卫，未到期的公司自动 skip，因此高频 tick 安全；
+- §9 其余三项：idle_jobs_cleanup_task（每日 03:00 全局 TTL 下架）、
+  resume_parse_task / run_match_task（按 resume_id 异步解析与重算，由 API 侧
+  settings.resume_parse_async / match_async 开关投递，投递失败自动降级为请求内同步）；
 - SQLite/无 Redis 环境下 worker/beat 无法运行，属预期（开发期用
   collect_cli.py 手动触发，生产/联调用 docker-compose 起 Redis）。
 
@@ -48,6 +51,16 @@ celery_app.conf.update(
         "reminders-daily": {
             "task": "app.workers.celery_app.scan_reminders_task",
             "schedule": crontab(hour=9, minute=0),
+        },
+        # 每日 03:00 全局 TTL 下架：兜底停用/删除公司留下的孤儿职位（§9 idle_jobs_cleanup）
+        "idle-jobs-cleanup-daily": {
+            "task": "app.workers.celery_app.idle_jobs_cleanup_task",
+            "schedule": crontab(hour=3, minute=0),
+        },
+        # 每日 09:30 面试催进（§12.6 P5 ②）：面试时间临近/刚过未更新结果的申请
+        "interview-reminders-daily": {
+            "task": "app.workers.celery_app.interview_reminder_task",
+            "schedule": crontab(hour=9, minute=30),
         },
     },
 )
@@ -109,5 +122,99 @@ def scan_reminders_task() -> dict:
                 print(
                     f"[reminder] application #{it['application_id']} "
                     f"{it['job_title']!r} {it['status']} 卡 {it['stuck_days']} 天 -> {it['apply_url']}"
+                )
+        return {"total": len(items), "mailed": mailed, "im_sent": im_sent}
+
+
+@celery_app.task(name="app.workers.celery_app.idle_jobs_cleanup_task")
+def idle_jobs_cleanup_task(ttl_days: int | None = None) -> dict:
+    """每日全局 TTL 下架（§9）：active 且超 TTL 天未保鲜 → expired，并重算匹配分。"""
+    from app.core.db import SessionLocal
+    from app.services.collect import cleanup_idle_jobs
+
+    with SessionLocal() as session:
+        return cleanup_idle_jobs(session, ttl_days=ttl_days)
+
+
+@celery_app.task(name="app.workers.celery_app.resume_parse_task")
+def resume_parse_task(resume_id: int) -> dict:
+    """上传后异步解析（§9）：按 resume_id 重新解析并落 profile，再重算该简历匹配分。
+
+    幂等：profile.parse_status == "done" 时直接返回（acks_late 下的重投递不重复调 LLM）。
+    失败不抛异常，把 parse_status 置 failed 并记 notes，便于前端展示与人工重试。
+    """
+    from app.core.db import SessionLocal
+    from app.models import Resume
+    from app.pipelines.match import refresh_matches
+    from app.pipelines.parse import parse_resume_text
+
+    with SessionLocal() as session:
+        resume = session.get(Resume, resume_id)
+        if resume is None:
+            return {"resume_id": resume_id, "error": "resume not found"}
+        profile = dict(resume.profile or {})
+        if profile.get("parse_status") == "done":
+            return {"resume_id": resume_id, "status": "skipped", "reason": "already_parsed"}
+        try:
+            parsed = parse_resume_text(resume.raw_text or "", session)
+        except Exception as exc:
+            profile["parse_status"] = "failed"
+            profile["parse_error"] = f"{type(exc).__name__}: {exc}"
+            resume.profile = profile
+            session.commit()
+            return {"resume_id": resume_id, "status": "failed", "error": profile["parse_error"]}
+
+        parsed["parse_status"] = "done"
+        resume.profile = parsed
+        resume.lang = parsed.get("lang", "zh")
+        session.commit()
+        matched = refresh_matches(session, resume)
+        return {
+            "resume_id": resume_id,
+            "status": "ok",
+            "source": parsed.get("source"),
+            "skills": len(parsed.get("skills") or []),
+            "matched": matched,
+        }
+
+
+@celery_app.task(name="app.workers.celery_app.run_match_task")
+def run_match_task(resume_id: int) -> dict:
+    """画像修改后异步重算（§9）：按 resume_id 重建 match_scores（先删后插，幂等）。"""
+    from app.core.db import SessionLocal
+    from app.models import Resume
+    from app.pipelines.match import refresh_matches
+
+    with SessionLocal() as session:
+        resume = session.get(Resume, resume_id)
+        if resume is None:
+            return {"resume_id": resume_id, "error": "resume not found"}
+        return {"resume_id": resume_id, "status": "ok", "matched": refresh_matches(session, resume)}
+
+
+@celery_app.task(name="app.workers.celery_app.interview_reminder_task")
+def interview_reminder_task(within_days: int | None = None) -> dict:
+    """面试催进（§12.6 P5 ②）：临近/刚过未更新结果的面试 → 邮件/IM/日志。
+
+    邮件与 IM 通道复用 notify.py（未配置则降级打日志），与投递催进 daily 09:00 分时，
+    避免两类提醒挤在同一封/同一条消息里。
+    """
+    from app.core.db import SessionLocal
+    from app.services.interview import DEFAULT_WITHIN_DAYS, build_interview_body, scan_interview_reminders
+    from app.services.notify import is_configured, is_im_configured, send_im_text, send_mail
+
+    with SessionLocal() as session:
+        items = scan_interview_reminders(session, within_days=within_days or DEFAULT_WITHIN_DAYS)
+        if not items:
+            return {"total": 0, "mailed": False, "im_sent": False}
+        body = build_interview_body(items)
+        mailed = send_mail(f"【简历直达】面试提醒：{len(items)} 场待准备", body) if is_configured() else False
+        im_sent = send_im_text(body) if is_im_configured() else False
+        if not mailed and not im_sent:
+            for it in items:  # 邮件/IM 均未配置：降级打日志
+                print(
+                    f"[interview] application #{it['application_id']} "
+                    f"{it['job_title']!r} 面试 {it['interview_at']}（days_left={it['days_left']}）"
+                    f" -> {it['apply_url']}"
                 )
         return {"total": len(items), "mailed": mailed, "im_sent": im_sent}

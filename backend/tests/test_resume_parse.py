@@ -30,6 +30,27 @@ RESUME_ZH = """张三的简历
 
 RESUME_EN = "Senior Backend Engineer with 6 years experience. Skills: Python, Go.\n" * 3
 
+# 带章节标题的简历：覆盖教育/项目/实习三块的规则兜底抽取
+RESUME_SECTIONS = """李四
+联系方式：lisi@example.com
+
+教育经历
+浙江大学 · 计算机科学与技术 · 硕士 2021年9月 - 2024年6月
+主修课程：数据结构、操作系统
+
+项目经历
+智能招聘助手
+技术栈：Python、FastAPI
+PostgreSQL、Redis
+实现职位聚合与可解释推荐排序
+
+实习经历
+字节跳动
+后端开发实习生
+2023年7月 - 2023年9月
+负责推荐服务接口开发，QPS 提升 30%
+"""
+
 
 @pytest.fixture(autouse=True)
 def _no_llm_key(monkeypatch):
@@ -98,6 +119,67 @@ def test_validate_llm_bad_salary_uses_rule():
 
 
 # ---------- 整管道 ----------
+
+
+def test_extract_rules_experience_blocks():
+    """规则路径：教育/项目/实习三块（章节切分 + 正则兜底）。"""
+    p = extract_profile_rules(RESUME_SECTIONS)
+
+    edu = p["education"][0]
+    assert edu["school"] == "浙江大学"
+    assert edu["major"] == "计算机科学与技术"
+    assert edu["degree"] == "master"
+    assert (edu["start"], edu["end"]) == ("2021/9", "2024/6")
+    assert any("主修课程" in h for h in edu["highlights"])
+
+    proj = p["projects"][0]
+    assert proj["name"] == "智能招聘助手"
+    # 技术栈跨行续写逐行拆分，不粘成 "FastAPI PostgreSQL" 这类假技能名
+    assert proj["tech"] == ["Python", "FastAPI", "PostgreSQL", "Redis"]
+    assert "实现职位聚合与可解释推荐排序" in proj["description"]
+
+    intern = p["internships"][0]
+    assert intern["company"] == "字节跳动"
+    assert intern["title"] == "后端开发实习生"
+    assert (intern["start"], intern["end"]) == ("2023/7", "2023/9")
+    assert "QPS" in intern["description"]
+
+
+def test_validate_profile_backfills_experience_blocks():
+    """LLM 只给 skills 时，三块经历由规则回填并记 notes。"""
+    rule = extract_profile_rules(RESUME_SECTIONS)
+    notes: list[str] = []
+    merged = validate_profile({"skills": ["python"]}, rule, notes)
+
+    assert merged["education"] == rule["education"]
+    assert merged["projects"] == rule["projects"]
+    assert merged["internships"] == rule["internships"]
+    assert {"education_from_rules", "projects_from_rules", "internships_from_rules"} <= set(notes)
+
+
+def test_parse_resume_llm_keeps_experience_blocks(session, monkeypatch):
+    """LLM 路径：三块经历保留 LLM 版本（不被规则覆盖），项目技术栈并入 skills。"""
+    from app.core import config
+    from app.pipelines import parse as parse_mod
+
+    monkeypatch.setattr(config.settings, "llm_api_key", "fake-key")
+
+    def fake_llm(text):
+        return {
+            "skills": ["Python"],
+            "education": [{"school": "清华大学", "major": "软件工程", "degree": "master"}],
+            "projects": [{"name": "LLM 项目", "tech": ["Kafka"]}],
+            "internships": [{"company": "某厂", "title": "后端实习生"}],
+        }
+
+    monkeypatch.setattr(parse_mod, "llm_extract_profile", fake_llm)
+    profile = parse_resume_text(RESUME_SECTIONS, session)
+
+    assert profile["source"] == "llm"
+    assert profile["education"][0]["school"] == "清华大学"  # LLM 优先，未被规则覆盖
+    assert profile["projects"][0]["name"] == "LLM 项目"
+    assert profile["internships"][0]["company"] == "某厂"
+    assert "kafka" in profile["skills"]  # 项目技术栈并入 skills（parse.py 归一）
 
 
 def test_parse_resume_rules_fallback(session):

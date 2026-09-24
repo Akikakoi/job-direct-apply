@@ -6,7 +6,16 @@ import pytest
 
 celery = pytest.importorskip("celery")
 
-from app.workers.celery_app import celery_app, collect_company_task, collect_jobs_task, scan_reminders_task
+from app.workers.celery_app import (
+    celery_app,
+    collect_company_task,
+    collect_jobs_task,
+    idle_jobs_cleanup_task,
+    interview_reminder_task,
+    resume_parse_task,
+    run_match_task,
+    scan_reminders_task,
+)
 
 
 def test_beat_schedule_registered():
@@ -18,13 +27,32 @@ def test_beat_schedule_registered():
     assert celery_app.conf.beat_schedule["reminders-daily"]["task"] == (
         "app.workers.celery_app.scan_reminders_task"
     )
+    # §9 idle_jobs_cleanup：每日 03:00 全局 TTL 下架
+    assert celery_app.conf.beat_schedule["idle-jobs-cleanup-daily"]["task"] == (
+        "app.workers.celery_app.idle_jobs_cleanup_task"
+    )
+    # §12.6 P5 ② 面试催进：每日 09:30（与投递催进 09:00 分时）
+    assert celery_app.conf.beat_schedule["interview-reminders-daily"]["task"] == (
+        "app.workers.celery_app.interview_reminder_task"
+    )
 
 
 def test_tasks_registered():
     names = {t for t in celery_app.tasks if not t.startswith("celery.")}
-    assert "app.workers.celery_app.collect_jobs_task" in names
-    assert "app.workers.celery_app.collect_company_task" in names
-    assert "app.workers.celery_app.scan_reminders_task" in names
+    for name in (
+        "app.workers.celery_app.collect_jobs_task",
+        "app.workers.celery_app.collect_company_task",
+        "app.workers.celery_app.scan_reminders_task",
+        "app.workers.celery_app.idle_jobs_cleanup_task",
+        "app.workers.celery_app.resume_parse_task",
+        "app.workers.celery_app.run_match_task",
+        "app.workers.celery_app.interview_reminder_task",
+    ):
+        assert name in names
+    # §9 三项按 resume_id 入参（API 侧 _enqueue 用任务名 + 位置参数投递）
+    assert resume_parse_task.name == "app.workers.celery_app.resume_parse_task"
+    assert run_match_task.name == "app.workers.celery_app.run_match_task"
+    assert idle_jobs_cleanup_task.name == "app.workers.celery_app.idle_jobs_cleanup_task"
 
 
 def test_broker_defaults_to_local_redis():
