@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { authFetch } from "./auth";
+
 const EXPLAIN_LABEL = { skill: "技能", city: "城市", exp: "经验", role: "岗位" };
 const DEGREE_LABEL = { phd: "博士", master: "硕士", bachelor: "本科", associate: "大专" };
 
@@ -193,7 +195,7 @@ export default function Home() {
   useEffect(() => {
     (async () => {
       try {
-        const resp = await fetch("/api/legal/policies");
+        const resp = await authFetch("/api/legal/policies");
         if (!resp.ok) return;
         const body = await toJson(resp);
         // 告知文案与当前政策版本一并保存：版本要原样回传给 POST /api/applications 留痕
@@ -209,8 +211,8 @@ export default function Home() {
   async function loadSideData() {
     try {
       const [appsResp, remResp] = await Promise.all([
-        fetch("/api/applications?user_id=1&limit=50"),
-        fetch("/api/reminders?user_id=1"),
+        authFetch("/api/applications?user_id=1&limit=50"),
+        authFetch("/api/reminders?user_id=1"),
       ]);
       if (appsResp.ok) {
         setApps((await appsResp.json()).data.items);
@@ -227,7 +229,7 @@ export default function Home() {
   // 页面刷新后靠它恢复展示，失败不阻塞推荐列表。
   async function loadResumeProfile(resumeId) {
     try {
-      const resp = await fetch(`/api/resumes/${resumeId}`);
+      const resp = await authFetch(`/api/resumes/${resumeId}`);
       if (!resp.ok) return;
       const body = await resp.json();
       const profile = body?.data?.profile;
@@ -243,7 +245,7 @@ export default function Home() {
     for (let i = 0; i < attempts; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
       try {
-        const resp = await fetch(`/api/resumes/${resumeId}`);
+        const resp = await authFetch(`/api/resumes/${resumeId}`);
         if (!resp.ok) return null;
         const profile = (await resp.json())?.data?.profile;
         if (profile && profile.parse_status !== "pending") return profile;
@@ -258,7 +260,7 @@ export default function Home() {
     setLoading(true);
     setError("");
     try {
-      const resp = await fetch(`/api/recommend?resume_id=${resumeId}&limit=50&region=${regionValue}`);
+      const resp = await authFetch(`/api/recommend?resume_id=${resumeId}&limit=50&region=${regionValue}`);
       if (!resp.ok) {
         if (resp.status === 404) {
           localStorage.removeItem("resume_id");
@@ -291,7 +293,7 @@ export default function Home() {
   async function confirmApply(job) {
     setError("");
     try {
-      const resp = await fetch("/api/applications", {
+      const resp = await authFetch("/api/applications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -321,7 +323,7 @@ export default function Home() {
     try {
       const form = new FormData();
       form.append("file", file);
-      const resp = await fetch("/api/resumes", { method: "POST", body: form });
+      const resp = await authFetch("/api/resumes", { method: "POST", body: form });
       const body = await toJson(resp);
       if (!resp.ok) {
         throw new Error(body?.detail || `上传失败（服务端错误 ${resp.status}，请重试或查看后端日志）`);
@@ -579,7 +581,7 @@ export default function Home() {
                       style={{ padding: "3px 10px", fontSize: 12 }}
                       onClick={async () => {
                         setError("");
-                        const resp = await fetch(`/api/applications/${a.id}/autofill`, { method: "POST" });
+                        const resp = await authFetch(`/api/applications/${a.id}/autofill`, { method: "POST" });
                         const body = await resp.json();
                         if (!resp.ok) setError(body.detail || "帮填失败");
                       }}

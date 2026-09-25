@@ -336,6 +336,42 @@ input[type="file"] {
   color: #fff;
 }
 
+/* 账号状态条（§4.3）：固定左上角，与右上角语言开关对称；同样不吃移动端 44px 触控规则 */
+.auth-bar {
+  position: fixed;
+  top: 8px;
+  left: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  z-index: 20;
+}
+
+.auth-bar button {
+  min-height: 0;
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 登录表单（§4.3）：输入框与按钮同宽同高，窄屏下自然铺满 */
+.auth-form input {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 14px;
+  color: inherit;
+  background: #fff;
+}
+
+.auth-form button[type="submit"] {
+  width: 100%;
+}
+
 /* 移动端适配（§12.6 P5 ④）：单列收窄留白、标题窄屏换行、触控目标 ≥44px、
    底部留出 iPhone 安全区；桌面样式不受影响。 */
 @media (max-width: 640px) {

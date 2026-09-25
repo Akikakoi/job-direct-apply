@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 
 import "./globals.css";
 
+import AuthBar from "./auth-bar";
 import LangSwitch from "./lang-switch";
 import ServiceWorkerRegister from "./sw-register";
 import { LANG_COOKIE, normalizeLang } from "./i18n";
@@ -34,6 +35,7 @@ export default async function RootLayout({ children }) {
     <html lang={lang}>
       <body>
         {children}
+        <AuthBar />
         <LangSwitch lang={lang} />
         <ServiceWorkerRegister />
       </body>
