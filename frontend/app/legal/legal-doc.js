@@ -10,8 +10,8 @@ import { cookies } from "next/headers";
 import { LANG_COOKIE, normalizeLang, t } from "../i18n";
 import LEGAL_TEXT from "./legal-text.json";
 
-export const POLICY_VERSION = "1.0";
-export const POLICY_EFFECTIVE_DATE = "2026-09-24";
+export const POLICY_VERSION = "1.1";
+export const POLICY_EFFECTIVE_DATE = "2026-09-25";
 
 export async function legalLang() {
   const store = await cookies();

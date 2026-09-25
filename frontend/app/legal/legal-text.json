@@ -172,7 +172,7 @@
         "id": "security",
         "h": "四、存储与安全",
         "body": [
-          { "p": "个人信息存储于平台服务器，简历原件与画像数据仅对你的账号（当前为单用户形态）可见。平台采取访问控制与最小权限原则；**简历原件的加密存储（KMS/应用层 AES）尚未实现**，上线前需完成，故当前部署仅限本人使用与联调环境。" }
+          { "p": "个人信息存储于平台服务器，简历原件与画像数据仅对你的账号（当前为单用户形态）可见。平台采取访问控制与最小权限原则；**简历原件在服务端以应用层加密（AES-GCM）存储**，加密密钥仅由部署环境变量提供、不入库；未配置密钥的部署为明文存储，仅限本人使用与联调环境。" }
         ]
       },
       {
@@ -239,7 +239,7 @@
         "id": "security",
         "h": "4. Storage and Security",
         "body": [
-          { "p": "Personal information is stored on the Platform's servers, and resume originals and profile data are visible only to your account (a single-user setup at present). The Platform applies access control and the principle of least privilege. **Encrypted storage of resume originals (KMS or application-layer AES) is not yet implemented** and must be completed before launch, so the current deployment is limited to your own use and integration testing." }
+          { "p": "Personal information is stored on the Platform's servers, and resume originals and profile data are visible only to your account (a single-user setup at present). The Platform applies access control and the principle of least privilege. **Resume originals are stored on the server with application-layer encryption (AES-GCM)**; the encryption key is supplied only through deployment environment variables and is never stored in the database. Deployments without a configured key store plaintext and are limited to your own use and integration testing." }
         ]
       },
       {

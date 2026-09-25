@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     official_site_interval_min: int = 720   # 官网兜底更保守
     ttl_multiplier: int = 3                 # 连续 N 个采集周期未见更新 → expired
 
+    # §4.3 账号体系（JWT，HS256，标准库实现；见 app/services/auth.py）
+    # 生产必须换掉默认值：python -c "from app.services.auth import new_secret; print(new_secret())"
+    auth_secret: str = "dev-insecure-secret-change-me"
+    auth_access_ttl_min: int = 120          # access 令牌有效期（分钟）
+    auth_refresh_ttl_days: int = 14         # refresh 令牌有效期（天）
+    # 默认关：表单/查询参数传 user_id 的旧客户端不被拦（鉴权是"可开可关"的一层，
+    # 不是硬依赖）；开=用户态接口必须带 Bearer，缺失一律 401。
+    auth_required: bool = False
+
     # §9 后台任务：异步化开关（默认关——开发期无 Redis/worker，走请求内同步）
     resume_parse_async: bool = False        # 上传后异步解析（resume_parse_task）
     match_async: bool = False               # 画像修改后异步重算（run_match_task）
@@ -45,6 +54,10 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_timeout_s: int = 60
     uploads_dir: str = "./uploads"          # 简历原件存盘目录
+    # §10 简历原件静态加密（AES-GCM，应用层密钥；见 app/services/crypto.py）
+    # 空 = 不加密（旧行为，prodcheck 会 warn「原件明文落盘」）；生成：
+    #   python -c "from app.services.crypto import new_key; print(new_key())"
+    uploads_key: str = ""
 
     # P2 规则匹配引擎权重（§7 一期，sum=1；反馈数据回归调参后可改）
     match_w_skill: float = 0.5
@@ -56,6 +69,14 @@ class Settings(BaseSettings):
     match_alpha: float = 0.75
     match_beta: float = 0.25
 
+    # §12.5 反馈回灌闭环：权重自动采纳（默认关——自动改线上排序不能默认开）
+    # 生效权重 = match_weight_versions 最新一行；本组参数只控制"自动采纳"的门槛与节奏
+    weights_auto_tune: bool = False          # 开=beat 按周评估并采纳优于基线的权重
+    weights_auto_tune_margin: float = 0.02   # NDCG 提升门槛（低于此视为噪声，不换参数）
+    weights_auto_tune_min_sample: int = 10   # 参与自动采纳所需的最小有反馈简历数
+    weights_auto_tune_step: float = 0.1      # 网格粒度（与 /api/insights/tuning 同义）
+    weights_auto_tune_k: int = 10            # 评估用的 NDCG@k
+
     # P3 投递催进：pending 状态卡超过 T 个自然日进入提醒（§8，T 天默认值挂账销项）
     reminder_after_days: int = 3
 
@@ -64,6 +85,14 @@ class Settings(BaseSettings):
     autofill_email: str = ""
     autofill_phone: str = ""
     autofill_headless: bool = False  # 有头模式：用户人工核对后手动提交
+
+    # §10 可观测性（app/services/obs.py）：日志/指标默认开、JSON 日志与 Sentry 默认关
+    log_json: bool = False                  # true = 一行一个 JSON（供 Loki/ES；开发期控制台保持可读）
+    metrics_enabled: bool = True            # GET /metrics（Prometheus 文本格式）
+    metrics_token: str = ""                 # 非空则 /metrics 必须带同值令牌（Prometheus 通常无凭据，默认不强制）
+    metrics_ops_window_hours: int = 24      # 抓取时用 ops 口径算业务指标的窗口
+    sentry_dsn: str = ""                    # 非空且装了 sentry-sdk 才初始化，否则静默跳过
+    sentry_environment: str = "production"
 
     # P4 催进邮件通知：smtp_host 空 = 不发邮件（beat 只打日志）
     smtp_host: str = ""                     # 如 smtp.qq.com

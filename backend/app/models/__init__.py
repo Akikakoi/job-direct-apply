@@ -16,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -89,6 +90,26 @@ class Job(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class MatchWeightVersion(Base):
+    """§12.5 反馈回灌闭环：被采纳的匹配权重版本（历史即审计轨迹）。
+
+    生效权重 = 最新一行；表空时回退 `settings.MATCH_W_*`（旧部署行为不变）。
+    落库而不写 `.env`：权重是随反馈演进的数据，要可审计、可回滚；`.env` 是部署配置。
+    """
+
+    __tablename__ = "match_weight_versions"
+
+    id: Mapped[int] = mapped_column(BIGPK, primary_key=True, autoincrement=True)
+    weights: Mapped[dict] = mapped_column(JSONType, nullable=False)  # {skill,city,exp,role,alpha,beta}
+    source: Mapped[str] = mapped_column(Text, nullable=False)  # manual|auto
+    note: Mapped[str | None] = mapped_column(Text)
+    sample_size: Mapped[int | None] = mapped_column(Integer)  # 采纳时的有反馈简历数
+    baseline_ndcg: Mapped[float | None] = mapped_column(Float)
+    new_ndcg: Mapped[float | None] = mapped_column(Float)
+    rematched: Mapped[int | None] = mapped_column(Integer)  # 采纳后重算的 match_scores 行数
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class User(Base):

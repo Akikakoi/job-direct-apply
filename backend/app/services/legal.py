@@ -18,8 +18,8 @@
 
 from __future__ import annotations
 
-POLICY_VERSION = "1.0"
-POLICY_EFFECTIVE_DATE = "2026-09-24"
+POLICY_VERSION = "1.1"
+POLICY_EFFECTIVE_DATE = "2026-09-25"
 
 # 政策清单（documents）：path 供前端页脚/告知弹层跳转，version 供同意留痕比对
 POLICIES: list[dict] = [

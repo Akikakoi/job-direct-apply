@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -34,6 +35,9 @@ PROD_DICT = {
     "im_webhook_type": "dingtalk",
     "im_webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=x",
     "im_webhook_secret": "d" * 20,
+    "auth_secret": "f" * 48,
+    "auth_required": True,
+    "uploads_key": base64.b64encode(b"k" * 32).decode(),
 }
 
 
@@ -123,6 +127,30 @@ def test_default_ua_contact_warns():
     assert "default_ua_contact" in _codes(report)
 
 
+def test_auth_required_off_warns():
+    """鉴权开关默认关：user_id 由请求参数传入，生产必须显式开启（§4.3）。"""
+    assert "auth_not_required" in _codes(audit_config({"auth_required": False}))
+    assert "auth_not_required" not in _codes(audit_config({"auth_required": True}))
+
+
+def test_default_auth_secret_fails_as_placeholder():
+    """出厂默认签名密钥（含 change-me）必须判 fail：泄露即可伪造任意用户令牌。"""
+    report = audit_config({"auth_secret": Settings().auth_secret})
+    assert report["status"] == "fail"
+    assert "placeholder_auth_secret" in _codes(report)
+    assert Settings().auth_secret not in json.dumps(report, ensure_ascii=False)
+
+
+def test_plaintext_uploads_warn_until_key_configured():
+    """简历原件未加密要持续提醒（隐私政策已如实披露，但生产应尽快配上密钥）。"""
+    assert "uploads_plaintext" in _codes(audit_config({"uploads_key": ""}))
+    keyed = {"uploads_key": base64.b64encode(b"k" * 32).decode()}
+    assert "uploads_plaintext" not in _codes(audit_config(keyed))
+    # 配了但非法（非 base64 / 长度不对）不归 warn：真用起来会在加解密时报错
+    report = audit_config({"uploads_key": "not-base64!!"})
+    assert "uploads_plaintext" not in _codes(report)
+
+
 # ---------- git 与示例文件 ----------
 
 
@@ -156,5 +184,5 @@ def test_repo_gitignore_excludes_env_file():
 
 def test_rotation_checklist_covers_key_and_infra_secrets():
     fields = {item["field"] for item in ROTATION_KEYS}
-    assert {"llm_api_key", "smtp_password", "DATABASE_URL", "REDIS_URL"} <= fields
+    assert {"llm_api_key", "smtp_password", "DATABASE_URL", "REDIS_URL", "auth_secret", "uploads_key"} <= fields
     assert all(item["why"] for item in ROTATION_KEYS)  # 每项都要说明为什么必须轮换

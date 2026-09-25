@@ -74,9 +74,10 @@ def test_report_metrics(session, client):
     # NDCG：唯一有反馈简历，J0(interview=2) 排第一 → 1.0
     assert data["ndcg_at_k"] == 1.0
     assert data["ndcg_resumes"] == 1
-    # 权重快照：看板展示 / 调参对照基线（与 settings 一致）
+    # 权重快照：看板展示 / 调参对照基线（与 settings 一致；含 source 标注当前取自哪里）
     assert data["weights"] == {
-        "skill": 0.5, "city": 0.2, "exp": 0.15, "role": 0.15, "alpha": 0.75, "beta": 0.25
+        "skill": 0.5, "city": 0.2, "exp": 0.15, "role": 0.15,
+        "alpha": 0.75, "beta": 0.25, "source": "settings",
     }
 
 

@@ -1,23 +1,34 @@
-"""FastAPI 入口（P1：健康检查 + 职位列表；P2：简历上传解析；鉴权/推荐等 P2+ 接入）。"""
+"""FastAPI 入口（P1：健康检查 + 职位列表；P2：简历上传解析；P3/P4/P5 投递、洞察、合规；§4.3 JWT 鉴权已接入）。"""
 
 from __future__ import annotations
 
+import hmac
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.models import Application, Company, Job, MatchScore, Resume
+from app.models import Application, Company, Job, MatchScore, Resume, User
 from app.pipelines.match import refresh_matches
 from app.pipelines.parse import parse_resume_text
 from app.pipelines.rules import detect_lang
 from app.pipelines.text_extract import UnsupportedFile, extract_text
+from app.services import crypto, obs
 from app.services.applications import IllegalTransition, scan_reminders, transition
+from app.services.auth import (
+    TYPE_ACCESS,
+    TYPE_REFRESH,
+    TokenError,
+    decode_token,
+    hash_password,
+    issue_tokens,
+    verify_password_or_dummy,
+)
 from app.services.city import city_match_variants
 
 
@@ -31,10 +42,210 @@ def get_session():
 
 app = FastAPI(title="Job Direct Apply", version="0.1.0")
 
+# §10 可观测性：JSON 日志（LOG_JSON=true 才开）、Sentry（配了 DSN 且装了 SDK 才初始化）
+obs.setup_logging()
+obs.init_sentry()
+app.middleware("http")(obs.http_observability)
+
+
+@app.get("/metrics")
+def metrics(
+    request: Request,
+    token: str | None = Query(default=None, description="METRICS_TOKEN 配置后必填"),
+    session: Session = Depends(get_session),
+) -> Response:
+    """Prometheus 抓取点（§10）：HTTP 指标 + 业务口径（复用 ops，不在抓取路径另算一套）。
+
+    默认不强制凭据（Prometheus 抓取通常无凭据）；配了 `METRICS_TOKEN` 才要求同值令牌，
+    可用 `?token=` 或 `Authorization: Bearer`。指标内容不含密钥与个人信息。
+    """
+    if not settings.metrics_enabled:
+        raise HTTPException(status_code=404, detail="指标未启用（METRICS_ENABLED=false）")
+    expected = (settings.metrics_token or "").strip()
+    if expected:
+        bearer = (request.headers.get("authorization") or "").strip()
+        supplied = bearer.split()[-1] if bearer else (token or "")
+        if not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+            raise HTTPException(status_code=401, detail="指标访问令牌不正确")
+    body = obs.prometheus_text(session=session)
+    return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
+
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+# ---------- §4.3 鉴权依赖（JWT / HS256；实现见 app/services/auth.py） ----------
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    """从 Authorization 头取 Bearer 令牌；非 Bearer 形式按「未携带」处理（兼容旧客户端）。"""
+    if not authorization:
+        return None
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1]
+
+
+def current_user(authorization: str | None = Header(default=None)) -> dict | None:
+    """当前登录用户（未携带令牌返回 None，是否 401 由 `settings.auth_required` 决定）。
+
+    带了**坏令牌**一律 401 而不静默降级为匿名：客户端以为自己是登录态时，降级会变成
+    "莫名看不见自己的数据/看到别人的数据"，说清楚原因（reason）比装没事更安全。
+    """
+    token = _bearer_token(authorization)
+    if token is None:
+        if settings.auth_required:
+            raise HTTPException(status_code=401, detail="需要登录（缺少 Bearer 令牌）")
+        return None
+    try:
+        payload = decode_token(token, expected_typ=TYPE_ACCESS)
+    except TokenError as exc:
+        raise HTTPException(status_code=401, detail=f"令牌无效（{exc.reason}）") from None
+    return {"id": payload["user_id"], "role": payload.get("role") or "user"}
+
+
+def _scope_user_id(requested: int | None, user: dict | None) -> int | None:
+    """把**自述型** user_id（表单/查询参数/请求体）与令牌主体对齐。
+
+    规则：有令牌时普通用户**以令牌为准（静默覆盖）**，admin 则尊重显式传值（可代操作）。
+    这里不因"传了别人的 id"就 403——该字段表达的是"我以谁的身份提交"，不是资源标识：
+    静默以令牌为准既绝了冒名，又不会让带着旧默认值（`user_id=1`）的老客户端登录后
+    突然全部 403（上线过渡期的真实坑，冒烟时撞到过）。**按 id 取他人资源**的场景走
+    `_owned`，那里才是 403。
+    """
+    if user is None:
+        return requested
+    if user.get("role") == "admin":
+        return requested if requested is not None else user["id"]
+    return user["id"]
+
+
+def _owned(session: Session, model, obj_id: int, user: dict | None, what: str):
+    """按 id 取用户态资源并做归属校验：不存在 404、非本人（且非 admin）403。"""
+    row = session.get(model, obj_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"{what}不存在")
+    if user is not None and row.user_id != user["id"] and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail=f"越权访问他人{what}")
+    return row
+
+
+def _require_admin(user: dict | None) -> None:
+    """管理动作（公司映射增删改）：未登录时沿用 auth_required 开关口径，登录则必须 admin。"""
+    if user is None:
+        if settings.auth_required:
+            raise HTTPException(status_code=401, detail="需要登录（缺少 Bearer 令牌）")
+        return
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+
+
+# ---------- §4.3 账号体系（注册 / 登录 / 刷新 / 当前用户） ----------
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+def _user_out(user: User) -> dict:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "created_at": str(user.created_at),
+    }
+
+
+def _email_ok(email: str) -> bool:
+    """极简邮箱校验：够拦住明显错输入即可（真实验证靠"注册后能否收到信"，不引校验库）。"""
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        return False
+    local, _, domain = email.partition("@")
+    return bool(local) and "." in domain and not domain.startswith(".") and not domain.endswith(".")
+
+
+@app.post("/api/auth/register")
+def register(body: RegisterRequest, session: Session = Depends(get_session)) -> dict:
+    """注册并直接返回令牌对（免二次登录）。邮箱唯一（409）；口令过短/邮箱格式错 422。"""
+    from app.services.auth import MIN_PASSWORD_LEN
+
+    email = (body.email or "").strip().lower()
+    if not _email_ok(email):
+        raise HTTPException(status_code=422, detail="邮箱格式不正确")
+    if len(body.password or "") < MIN_PASSWORD_LEN:
+        raise HTTPException(status_code=422, detail=f"口令至少 {MIN_PASSWORD_LEN} 位")
+    exists = session.execute(
+        select(func.count()).select_from(User).where(func.lower(User.email) == email)
+    ).scalar_one()
+    if exists:
+        raise HTTPException(status_code=409, detail="邮箱已注册")
+    # 角色不接受客户端传入：自助注册一律 user，admin 由库/运维侧设置（否则等于自助提权）
+    user = User(email=email, password_hash=hash_password(body.password), role="user")
+    session.add(user)
+    session.commit()
+    return {
+        "code": 0,
+        "data": {**_user_out(user), **issue_tokens(user.id, user.role)},
+        "message": "ok",
+    }
+
+
+@app.post("/api/auth/login")
+def login(body: LoginRequest, session: Session = Depends(get_session)) -> dict:
+    """邮箱 + 口令登录。失败一律 401 且文案不区分"邮箱不存在/口令错"（不给枚举口子）。"""
+    email = (body.email or "").strip().lower()
+    user = session.execute(select(User).where(func.lower(User.email) == email)).scalars().first()
+    # 用户不存在时也走一次等开销散列（verify_password_or_dummy），响应时间不泄露注册状态
+    if user is None or not verify_password_or_dummy(body.password or "", user.password_hash):
+        raise HTTPException(status_code=401, detail="邮箱或口令不正确")
+    return {
+        "code": 0,
+        "data": {**_user_out(user), **issue_tokens(user.id, user.role)},
+        "message": "ok",
+    }
+
+
+@app.post("/api/auth/refresh")
+def refresh_token(body: RefreshRequest, session: Session = Depends(get_session)) -> dict:
+    """用 refresh 令牌换新令牌对。access 令牌不能当 refresh 用（typ 校验，401）。"""
+    try:
+        payload = decode_token(body.refresh_token, expected_typ=TYPE_REFRESH)
+    except TokenError as exc:
+        raise HTTPException(status_code=401, detail=f"刷新令牌无效（{exc.reason}）") from None
+    user = session.get(User, payload["user_id"])
+    if user is None:  # 签名有效但账号已删除：令牌不能"复活"账号
+        raise HTTPException(status_code=401, detail="账号不存在")
+    return {
+        "code": 0,
+        "data": {**_user_out(user), **issue_tokens(user.id, user.role)},
+        "message": "ok",
+    }
+
+
+@app.get("/api/auth/me")
+def me(
+    user: dict | None = Depends(current_user), session: Session = Depends(get_session)
+) -> dict:
+    """当前用户信息（**恒需令牌**，与 auth_required 开关无关——此接口本就是登录态自检）。"""
+    if user is None:
+        raise HTTPException(status_code=401, detail="需要登录（缺少 Bearer 令牌）")
+    row = session.get(User, user["id"])
+    if row is None:
+        raise HTTPException(status_code=401, detail="账号不存在")
+    return {"code": 0, "data": _user_out(row), "message": "ok"}
 
 
 @app.get("/api/jobs")
@@ -148,21 +359,25 @@ async def upload_resume(
     file: UploadFile | None = File(default=None),
     raw_text: str | None = Form(default=None),
     user_id: int = Form(default=1),
+    user: dict | None = Depends(current_user),
     session: Session = Depends(get_session),
 ) -> dict:
     """上传简历（txt/md/pdf 或直接贴文本），解析入库并返回 profile。"""
+    user_id = _scope_user_id(user_id, user)
     saved_path: str | None = None
+    file_encrypted = False
     try:
         if file is not None:
             data = await file.read()
             filename = file.filename or "resume.txt"
             text = extract_text(filename, data)
-            # 原件存盘，便于追溯/重解析
+            # 原件存盘，便于追溯/重解析；配了 UPLOADS_KEY 则密文落盘（§10 静态加密）
             uploads = Path(settings.uploads_dir)
             uploads.mkdir(parents=True, exist_ok=True)
             suffix = "." + filename.rsplit(".", 1)[-1].lower()
             dest = uploads / f"resume_{user_id}_{int(datetime.now().timestamp())}{suffix}"
-            dest.write_bytes(data)
+            file_encrypted = crypto.enabled()
+            dest.write_bytes(crypto.encrypt_bytes(data) if file_encrypted else data)
             saved_path = str(dest)
         elif raw_text:
             text = raw_text
@@ -199,6 +414,7 @@ async def upload_resume(
                 "source": None,
                 "is_active": True,
                 "parse_status": "pending",
+                "file_encrypted": file_encrypted,
             },
             "message": "ok",
         }
@@ -217,13 +433,20 @@ async def upload_resume(
             "source": (resume.profile or {}).get("source"),
             "is_active": True,
             "parse_status": parse_status,
+            "file_encrypted": file_encrypted,
         },
         "message": "ok",
     }
 
 
 @app.get("/api/resumes")
-def list_resumes(user_id: int | None = None, session: Session = Depends(get_session)) -> dict:
+def list_resumes(
+    user_id: int | None = None,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
+) -> dict:
+    # 登录态下列表恒按令牌主体过滤（不传 user_id 也不会看到全库简历）
+    user_id = _scope_user_id(user_id, user)
     stmt = select(Resume)
     count_stmt = select(func.count()).select_from(Resume)
     if user_id is not None:
@@ -253,11 +476,13 @@ def list_resumes(user_id: int | None = None, session: Session = Depends(get_sess
 
 
 @app.post("/api/resumes/{resume_id}/activate")
-def activate_resume(resume_id: int, session: Session = Depends(get_session)) -> dict:
+def activate_resume(
+    resume_id: int,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
+) -> dict:
     """标记该简历为当前生效（同用户其他简历取消）。"""
-    resume = session.get(Resume, resume_id)
-    if resume is None:
-        raise HTTPException(status_code=404, detail="简历不存在")
+    resume = _owned(session, Resume, resume_id, user, "简历")
     _activate_only(session, resume.user_id, resume.id)
     resume.is_active = True
     session.commit()
@@ -287,11 +512,13 @@ def _remove_upload_file(file_path: str | None) -> bool:
 
 
 @app.delete("/api/resumes/{resume_id}")
-def delete_resume(resume_id: int, session: Session = Depends(get_session)) -> dict:
+def delete_resume(
+    resume_id: int,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
+) -> dict:
     """删除简历（连带 match_scores + 磁盘原件，§14 ① 个人信息删除口径）。"""
-    resume = session.get(Resume, resume_id)
-    if resume is None:
-        raise HTTPException(status_code=404, detail="简历不存在")
+    resume = _owned(session, Resume, resume_id, user, "简历")
     session.execute(
         delete(MatchScore).where(MatchScore.resume_id == resume.id)
     )
@@ -306,10 +533,12 @@ def delete_resume(resume_id: int, session: Session = Depends(get_session)) -> di
 
 
 @app.get("/api/resumes/{resume_id}")
-def get_resume(resume_id: int, session: Session = Depends(get_session)) -> dict:
-    resume = session.get(Resume, resume_id)
-    if resume is None:
-        raise HTTPException(status_code=404, detail="简历不存在")
+def get_resume(
+    resume_id: int,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
+) -> dict:
+    resume = _owned(session, Resume, resume_id, user, "简历")
     return {
         "code": 0,
         "data": {
@@ -327,12 +556,11 @@ def get_resume(resume_id: int, session: Session = Depends(get_session)) -> dict:
 def update_resume_profile(
     resume_id: int,
     body: ProfileUpdate,
+    user: dict | None = Depends(current_user),
     session: Session = Depends(get_session),
 ) -> dict:
     """人工修正 profile（白名单字段）；修改后触发重匹配在匹配引擎接入时生效。"""
-    resume = session.get(Resume, resume_id)
-    if resume is None:
-        raise HTTPException(status_code=404, detail="简历不存在")
+    resume = _owned(session, Resume, resume_id, user, "简历")
 
     current = dict(resume.profile or {})
     for key, value in body.profile.items():
@@ -406,15 +634,14 @@ def recommend(
     offset: int = 0,
     refresh: bool = False,
     region: str = "all",  # all=全部 | cn=国内 | overseas=海外
+    user: dict | None = Depends(current_user),
     session: Session = Depends(get_session),
 ) -> dict:
     """可解释排序推荐：读 match_scores 缓存；无缓存或 refresh=true 时全量重算。"""
     if region not in ("all", "cn", "overseas"):
         raise HTTPException(status_code=422, detail="region 仅支持 all|cn|overseas")
 
-    resume = session.get(Resume, resume_id)
-    if resume is None:
-        raise HTTPException(status_code=404, detail="简历不存在")
+    resume = _owned(session, Resume, resume_id, user, "简历")
 
     cached = session.execute(
         select(func.count()).select_from(MatchScore).where(MatchScore.resume_id == resume.id)
@@ -499,7 +726,9 @@ class StatusUpdate(BaseModel):
 
 @app.post("/api/applications")
 def create_application(
-    body: ApplicationCreate, session: Session = Depends(get_session)
+    body: ApplicationCreate,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
 ) -> dict:
     """创建投递记录（直达链接模式）。authorized=false 拒绝（§4 合规钩子）。
 
@@ -519,13 +748,15 @@ def create_application(
     job = session.get(Job, body.job_id)
     if job is None or job.status != "active":
         raise HTTPException(status_code=404, detail="职位不存在或已失效")
-    if body.resume_id is not None and session.get(Resume, body.resume_id) is None:
-        raise HTTPException(status_code=404, detail="简历不存在")
+    # 登录态下以令牌主体为准：body.user_id 改成别人也不成立（越权 403）
+    owner_id = _scope_user_id(body.user_id, user)
+    if body.resume_id is not None:
+        _owned(session, Resume, body.resume_id, user, "简历")
 
     # 防重复：同用户同职位已有进行中的申请
     dup = session.execute(
         select(Application).where(
-            Application.user_id == body.user_id,
+            Application.user_id == owner_id,
             Application.job_id == body.job_id,
             Application.status.notin_(["closed", "rejected"]),
         )
@@ -534,7 +765,7 @@ def create_application(
         raise HTTPException(status_code=409, detail=f"该职位已在投递流程中（#{dup.id}，{dup.status}）")
 
     app_row = Application(
-        user_id=body.user_id,
+        user_id=owner_id,
         resume_id=body.resume_id,
         job_id=body.job_id,
         mode="direct_link",  # 半自动帮填（semi_auto）为 P3 后半
@@ -564,8 +795,10 @@ def list_applications(
     user_id: int | None = None,
     status: str | None = None,
     limit: int = 50,
+    user: dict | None = Depends(current_user),
     session: Session = Depends(get_session),
 ) -> dict:
+    user_id = _scope_user_id(user_id, user)
     stmt = select(Application, Job).join(Job, Application.job_id == Job.id)
     count_stmt = select(func.count()).select_from(Application)
     if user_id is not None:
@@ -605,12 +838,13 @@ def list_applications(
 
 @app.post("/api/applications/{application_id}/status")
 def update_application_status(
-    application_id: int, body: StatusUpdate, session: Session = Depends(get_session)
+    application_id: int,
+    body: StatusUpdate,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
 ) -> dict:
     """状态机迁移（非法迁移 400），变更写入 feedback_log。"""
-    app_row = session.get(Application, application_id)
-    if app_row is None:
-        raise HTTPException(status_code=404, detail="投递记录不存在")
+    app_row = _owned(session, Application, application_id, user, "投递记录")
     try:
         app_row = transition(session, app_row, body.status, note=body.note)
     except IllegalTransition as exc:
@@ -624,9 +858,12 @@ def update_application_status(
 
 @app.get("/api/reminders")
 def reminders(
-    user_id: int | None = None, session: Session = Depends(get_session)
+    user_id: int | None = None,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
 ) -> dict:
     """催进扫描：submitted/under_review 卡超过 T 天（settings.reminder_after_days，默认 3）。"""
+    user_id = _scope_user_id(user_id, user)
     items = scan_reminders(session, user_id=user_id)
     return {"code": 0, "data": {"total": len(items), "items": items}, "message": "ok"}
 
@@ -681,10 +918,15 @@ def list_companies(
 
 
 @app.post("/api/companies")
-def create_company(body: CompanyUpsert, session: Session = Depends(get_session)) -> dict:
+def create_company(
+    body: CompanyUpsert,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
+) -> dict:
     """新增公司映射；slug 冲突 409，ats_type 未注册 400（采集前先校验）。"""
     from app.adapters.registry import ADAPTERS
 
+    _require_admin(user)
     if session.execute(
         select(func.count()).select_from(Company).where(Company.slug == body.slug)
     ).scalar_one():
@@ -702,11 +944,15 @@ def create_company(body: CompanyUpsert, session: Session = Depends(get_session))
 
 @app.put("/api/companies/{company_id}")
 def update_company(
-    company_id: int, body: CompanyUpsert, session: Session = Depends(get_session)
+    company_id: int,
+    body: CompanyUpsert,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
 ) -> dict:
     """全量更新公司映射（含 is_active 启停）。"""
     from app.adapters.registry import ADAPTERS
 
+    _require_admin(user)
     company = session.get(Company, company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="公司不存在")
@@ -728,9 +974,13 @@ def update_company(
 
 @app.delete("/api/companies/{company_id}")
 def delete_company(
-    company_id: int, force: bool = False, session: Session = Depends(get_session)
+    company_id: int,
+    force: bool = False,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
 ) -> dict:
     """删除公司映射；有职位时默认 409 拒绝，force=true 连带职位与 match_scores。"""
+    _require_admin(user)
     company = session.get(Company, company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="公司不存在")
@@ -787,6 +1037,106 @@ def tuning_insights(
     return {"code": 0, "data": report, "message": "ok"}
 
 
+# ---------- §12.5 反馈回灌闭环：权重版本的采纳 / 回滚 / 自动调参 ----------
+
+
+class WeightApplyRequest(BaseModel):
+    weights: dict
+    note: str | None = None
+    rematch: bool = True  # 采纳后是否立即全量重算 match_scores
+
+
+class AutoTuneRequest(BaseModel):
+    k: int = 10
+    step: float = 0.1
+    top: int = 5
+    min_sample: int | None = None
+    margin: float | None = None
+    apply: bool = False  # 默认只评估不生效（dry-run）
+    rematch: bool = True
+
+
+@app.get("/api/match-weights")
+def list_match_weights(
+    limit: int = Query(20, ge=1, le=100),
+    session: Session = Depends(get_session),
+) -> dict:
+    """当前生效权重 + 采纳历史（历史即审计轨迹，可回滚）。"""
+    from app.services.weights import active_weights, history
+
+    active = active_weights(session)
+    return {
+        "code": 0,
+        "data": {
+            "active": active.as_dict(),
+            "source": active.source,
+            "history": history(session, limit=limit),
+        },
+        "message": "ok",
+    }
+
+
+@app.post("/api/match-weights/apply")
+def apply_match_weights(
+    body: WeightApplyRequest,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
+) -> dict:
+    """采纳一组权重（管理动作）；权重不自洽 → 400，采纳后默认全量重算 match_scores。"""
+    from app.services.weights import apply_weights
+
+    _require_admin(user)
+    try:
+        data = apply_weights(
+            session, body.weights, source="manual", note=body.note, rematch=body.rematch
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"code": 0, "data": data, "message": "ok"}
+
+
+@app.post("/api/match-weights/rollback")
+def rollback_match_weights(
+    rematch: bool = True,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
+) -> dict:
+    """回滚到上一版；没有采纳记录时 400（当前用的是 .env 设置权重）。"""
+    from app.services.weights import rollback
+
+    _require_admin(user)
+    try:
+        data = rollback(session, rematch=rematch)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"code": 0, "data": data, "message": "ok"}
+
+
+@app.post("/api/match-weights/auto-tune")
+def auto_tune_match_weights(
+    body: AutoTuneRequest,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
+) -> dict:
+    """跑一次"反馈 → 调参 → （可选）采纳"：样本与增益双门槛不过就不换参数。"""
+    from app.services.weights import auto_tune
+
+    _require_admin(user)
+    if not 0.05 <= body.step <= 0.5:
+        raise HTTPException(status_code=422, detail="step 仅支持 [0.05, 0.5]")
+    data = auto_tune(
+        session,
+        k=body.k,
+        step=body.step,
+        top=body.top,
+        min_sample=body.min_sample,
+        margin=body.margin,
+        apply=body.apply,
+        rematch=body.rematch,
+    )
+    return {"code": 0, "data": data, "message": "ok"}
+
+
 # ---------- P5 ① 市场洞察报告（§12.6） ----------
 
 
@@ -815,11 +1165,13 @@ class InterviewAtUpdate(BaseModel):
 
 
 @app.get("/api/applications/{application_id}/interview-kit")
-def interview_kit(application_id: int, session: Session = Depends(get_session)) -> dict:
+def interview_kit(
+    application_id: int,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
+) -> dict:
     """面试陪伴包：准备清单 + 技能考察点 + 公司背景包（规则推导，离线可算）。"""
-    app_row = session.get(Application, application_id)
-    if app_row is None:
-        raise HTTPException(status_code=404, detail="投递记录不存在")
+    app_row = _owned(session, Application, application_id, user, "投递记录")
     from app.services.interview import build_interview_kit
 
     return {"code": 0, "data": build_interview_kit(session, app_row), "message": "ok"}
@@ -827,12 +1179,13 @@ def interview_kit(application_id: int, session: Session = Depends(get_session)) 
 
 @app.put("/api/applications/{application_id}/interview-at")
 def update_interview_at(
-    application_id: int, body: InterviewAtUpdate, session: Session = Depends(get_session)
+    application_id: int,
+    body: InterviewAtUpdate,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
 ) -> dict:
     """登记/清空面试时间（终态 400）；登记后进入 beat 的面试催进窗口。"""
-    app_row = session.get(Application, application_id)
-    if app_row is None:
-        raise HTTPException(status_code=404, detail="投递记录不存在")
+    app_row = _owned(session, Application, application_id, user, "投递记录")
     from app.services.interview import set_interview_at
 
     try:
@@ -854,11 +1207,13 @@ def update_interview_at(
 def interview_reminders(
     user_id: int | None = None,
     within_days: int = Query(2, ge=0, le=30),
+    user: dict | None = Depends(current_user),
     session: Session = Depends(get_session),
 ) -> dict:
     """面试催进扫描（平台内查询式，与 beat 的 interview_reminder_task 同源）。"""
     from app.services.interview import scan_interview_reminders
 
+    user_id = _scope_user_id(user_id, user)
     items = scan_interview_reminders(session, within_days=within_days, user_id=user_id)
     return {"code": 0, "data": {"total": len(items), "items": items}, "message": "ok"}
 
@@ -873,12 +1228,13 @@ class OptimizeRequest(BaseModel):
 
 @app.post("/api/resumes/{resume_id}/optimize")
 def optimize_resume(
-    resume_id: int, body: OptimizeRequest, session: Session = Depends(get_session)
+    resume_id: int,
+    body: OptimizeRequest,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
 ) -> dict:
     """对照目标 JD 逐条差距 + 改写建议（规则推导离线可算，LLM 为可选兜底）。"""
-    resume = session.get(Resume, resume_id)
-    if resume is None:
-        raise HTTPException(status_code=404, detail="简历不存在")
+    resume = _owned(session, Resume, resume_id, user, "简历")
     job = session.get(Job, body.job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="职位不存在")
@@ -911,7 +1267,9 @@ def seasonality_insights(
 
 @app.post("/api/applications/{application_id}/autofill")
 def autofill_application(
-    application_id: int, session: Session = Depends(get_session)
+    application_id: int,
+    user: dict | None = Depends(current_user),
+    session: Session = Depends(get_session),
 ) -> dict:
     """半自动帮填：有头浏览器打开申请页并预填常见字段，由用户人工核对提交。
 
@@ -919,9 +1277,7 @@ def autofill_application(
     """
     from app.services.autofill import AutofillNotConfigured, launch_autofill_thread
 
-    app_row = session.get(Application, application_id)
-    if app_row is None:
-        raise HTTPException(status_code=404, detail="投递记录不存在")
+    app_row = _owned(session, Application, application_id, user, "投递记录")
     if app_row.status in ("closed", "rejected"):
         raise HTTPException(status_code=400, detail="该投递已终止，无需帮填")
 

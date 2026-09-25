@@ -65,6 +65,14 @@ celery_app.conf.update(
     },
 )
 
+# §12.5 反馈回灌闭环：周度自动采纳（默认关——自动改线上排序不能默认开；
+# 开 = WEIGHTS_AUTO_TUNE=true，且采纳仍受样本/增益双门槛约束）
+if settings.weights_auto_tune:
+    celery_app.conf.beat_schedule["weights-auto-tune-weekly"] = {
+        "task": "app.workers.celery_app.auto_tune_weights_task",
+        "schedule": crontab(day_of_week="mon", hour=6, minute=0),
+    }
+
 
 @celery_app.task(name="app.workers.celery_app.collect_jobs_task")
 def collect_jobs_task() -> dict:
@@ -218,3 +226,20 @@ def interview_reminder_task(within_days: int | None = None) -> dict:
                     f" -> {it['apply_url']}"
                 )
         return {"total": len(items), "mailed": mailed, "im_sent": im_sent}
+
+
+@celery_app.task(name="app.workers.celery_app.auto_tune_weights_task")
+def auto_tune_weights_task(apply: bool | None = None) -> dict:
+    """§12.5 反馈回灌闭环：反馈 → 调参 → 采纳（样本与增益双门槛，低于门槛不换参数）。
+
+    WEIGHTS_AUTO_TUNE=false（默认）时直接跳过：beat 条目也不会注册；
+    传 apply=True 可手动强制跑一次（如运维临时评估），但自动采纳的门槛仍在。
+    """
+    from app.core.db import SessionLocal
+    from app.services.weights import auto_tune
+
+    effective = settings.weights_auto_tune if apply is None else bool(apply)
+    if not effective:
+        return {"skipped": True, "reason": "weights_auto_tune_disabled"}
+    with SessionLocal() as session:
+        return auto_tune(session, apply=True)

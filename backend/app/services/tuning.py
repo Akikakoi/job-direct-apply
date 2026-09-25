@@ -12,6 +12,12 @@
 注意：只读取数据、给出建议，**不写 .env、不改配置**；采纳需人工确认后改
 MATCH_W_* / MATCH_ALPHA 并重算 match_scores（`refresh_matches_all` 或
 `POST /api/resumes/{id}/profile`）。
+
+§12.5 闭环收尾（2026-09-25）：本模块仍**只读**，但采纳不再靠人改 `.env`——
+`services/weights.py` 把候选权重版本化落库（`match_weight_versions`），
+`POST /api/match-weights/apply` 采纳、`/rollback` 回滚、`WEIGHTS_AUTO_TUNE=true` 时
+由 beat 按周自动采纳（样本与增益双门槛）；生效权重 = 最新一行，表空时回退 `.env`。
+基线取自生效版本，故调参与线上排序始终同口径。
 """
 
 from __future__ import annotations
@@ -129,7 +135,7 @@ def search_weights(
     """在权重网格上搜索 NDCG@k 最优参数；样本不足只返回当前基线与提示。"""
     data = collect_samples(session)
     samples = data["resumes"]
-    baseline_weights = weights_snapshot()
+    baseline_weights = weights_snapshot(session)
     baseline = {
         "weights": baseline_weights,
         "ndcg_at_k": ndcg_at_k(samples, baseline_weights, baseline_weights["alpha"], k),

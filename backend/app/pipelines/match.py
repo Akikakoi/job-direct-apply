@@ -211,32 +211,34 @@ def weighted_rule(parts: dict[str, float], w_skill: float, w_city: float, w_exp:
     )
 
 
-def compute_match(profile: dict, job: Job, vec_score: float | None = None) -> dict:
+def compute_match(
+    profile: dict, job: Job, vec_score: float | None = None, weights: "WeightSet | None" = None
+) -> dict:
     """算单个职位得分；vec_score 提供时做 rule/vec 融合。
 
-    返回 {"score": 最终分, "rule": 规则分, "explain": [...]}。
+    `weights` 缺省用 `.env` 设置（旧行为）；线上重算由 `refresh_matches*` 传入**生效权重**
+    （§12.5 反馈回灌闭环：可能是被采纳过的版本，见 `services/weights.py`）。
     """
+    from app.services.weights import WeightSet
+
+    w = weights or WeightSet.from_settings()
     explain: list[dict] = []
     parts = match_parts(profile, job, explain)
-    rule = weighted_rule(
-        parts,
-        settings.match_w_skill,
-        settings.match_w_city,
-        settings.match_w_exp,
-        settings.match_w_role,
-    )
+    rule = weighted_rule(parts, w.skill, w.city, w.exp, w.role)
     if vec_score is None:
         return {"score": rule, "rule": rule, "explain": explain}
 
     explain.append({"key": "semantic", "score": vec_score, "note": "tfidf_cosine"})
-    final = round(
-        settings.match_alpha * rule + settings.match_beta * vec_score, 4
-    )
+    final = round(w.alpha * rule + w.beta * vec_score, 4)
     return {"score": final, "rule": rule, "explain": explain}
 
 
-def _rebuild(session: Session, resume: Resume, jobs: list[Job], index: TfidfIndex) -> int:
-    """对单份简历重建 match_scores（先删后插，幂等）；索引由调用方传入复用。"""
+def _rebuild(session: Session, resume: Resume, jobs: list[Job], index: TfidfIndex, weights=None) -> int:
+    """对单份简历重建 match_scores（先删后插，幂等）；索引与权重由调用方传入复用。"""
+    if weights is None:
+        from app.services.weights import active_weights
+
+        weights = active_weights(session)
     session.execute(delete(MatchScore).where(MatchScore.resume_id == resume.id))
     profile = resume.profile or {}
 
@@ -246,7 +248,7 @@ def _rebuild(session: Session, resume: Resume, jobs: list[Job], index: TfidfInde
     rows = []
     for i, job in enumerate(jobs):
         sim = index.similarity(i, query_vec) if use_semantic else None
-        result = compute_match(profile, job, vec_score=sim)
+        result = compute_match(profile, job, vec_score=sim, weights=weights)
         rows.append(
             MatchScore(
                 resume_id=resume.id,
@@ -266,10 +268,13 @@ def refresh_matches(session: Session, resume: Resume) -> int:
     """重算该简历对全部 active 职位的融合分，先删后插（幂等）。
 
     TF-IDF 索引每次重建（3470 条毫秒级），切 PG/向量模型时只换此实现。
+    权重取**当前生效版本**（§12.5 闭环：可能来自被采纳的权重版本）。
     """
+    from app.services.weights import active_weights
+
     jobs = session.execute(select(Job).where(Job.status == "active")).scalars().all()
     index = TfidfIndex().fit([job_text(j.title, j.description, j.skills) for j in jobs])
-    return _rebuild(session, resume, jobs, index)
+    return _rebuild(session, resume, jobs, index, weights=active_weights(session))
 
 
 def refresh_matches_all(session: Session, resumes: list[Resume] | None = None) -> int:
@@ -282,6 +287,9 @@ def refresh_matches_all(session: Session, resumes: list[Resume] | None = None) -
         resumes = session.execute(select(Resume)).scalars().all()
     if not resumes:
         return 0
+    from app.services.weights import active_weights
+
+    weights = active_weights(session)
     jobs = session.execute(select(Job).where(Job.status == "active")).scalars().all()
     index = TfidfIndex().fit([job_text(j.title, j.description, j.skills) for j in jobs])
-    return sum(_rebuild(session, r, jobs, index) for r in resumes)
+    return sum(_rebuild(session, r, jobs, index, weights=weights) for r in resumes)

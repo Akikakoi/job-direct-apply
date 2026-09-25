@@ -46,18 +46,15 @@ def latest_outcomes(session: Session) -> dict[int, str]:
     return latest
 
 
-def weights_snapshot() -> dict:
-    """当前生效的匹配权重（看板展示 / 调参对照基线）。"""
-    from app.core.config import settings
+def weights_snapshot(session: Session | None = None) -> dict:
+    """当前生效的匹配权重（看板展示 / 调参对照基线）。
 
-    return {
-        "skill": settings.match_w_skill,
-        "city": settings.match_w_city,
-        "exp": settings.match_w_exp,
-        "role": settings.match_w_role,
-        "alpha": settings.match_alpha,
-        "beta": settings.match_beta,
-    }
+    有 session 时取**被采纳的权重版本**（§12.5 闭环，`services/weights.py`），
+    否则回退 `.env` 设置——保证"看板显示的权重"与"实际排序用的权重"同一口径。
+    """
+    from app.services.weights import active_weights
+
+    return active_weights(session).as_dict()
 
 
 def build_quality_report(session: Session, user_id: int | None = None, k: int = 10) -> dict:
@@ -122,5 +119,5 @@ def build_quality_report(session: Session, user_id: int | None = None, k: int = 
         "ndcg_at_k": round(sum(ndcgs) / len(ndcgs), 4) if ndcgs else None,
         "ndcg_resumes": len(ndcgs),
         "k": k,
-        "weights": weights_snapshot(),
+        "weights": weights_snapshot(session),
     }

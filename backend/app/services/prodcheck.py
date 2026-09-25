@@ -6,7 +6,7 @@
 
 分级（fail 阻断上线 / warn 需人工确认 / info 仅告知）：
 - fail：密钥为占位或过短、声明了 SMTP/IM 却缺必填项、`.env` 被 git 跟踪；
-- warn：仍在 SQLite、未启用 Redis、采集 UA 还留着默认示例邮箱、SMTP 缺收发件人；
+- warn：仍在 SQLite、未启用 Redis、采集 UA 还留着默认示例邮箱、SMTP 缺收发件人、未开启 AUTH_REQUIRED、简历原件未加密（UPLOADS_KEY 为空）；
 - info：密钥轮换清单（人工在服务商侧操作，代码只能列清单与判长度）。
 
 **密钥值本身绝不打印、绝不入库**：本模块只判长度/命中占位词，不返回原文。
@@ -17,7 +17,7 @@ from __future__ import annotations
 from app.core.config import Settings
 
 # 需要按密钥对待的字段（判长度与占位词）；smtp_user/notify_email 等非密钥字段不在此列
-SECRET_FIELDS = ("llm_api_key", "ocr_api_key", "smtp_password", "im_webhook_secret")
+SECRET_FIELDS = ("llm_api_key", "ocr_api_key", "smtp_password", "im_webhook_secret", "auth_secret", "uploads_key", "metrics_token")
 
 # 密钥最短长度：短于此值几乎不可能是服务商真实签发的密钥
 MIN_SECRET_LEN = 16
@@ -44,6 +44,10 @@ ROTATION_KEYS: list[dict] = [
     {"field": "ocr_api_key", "why": "扫描件 OCR 调用外部视觉接口，同为计费密钥"},
     {"field": "smtp_password", "why": "SMTP 授权码等同于发件邮箱的发送权"},
     {"field": "im_webhook_secret", "why": "钉钉加签 secret 泄露可被伪造群消息"},
+    # AUTH_SECRET 泄露可自行签发任意用户/管理员的令牌，等于整个鉴权体系作废
+    {"field": "auth_secret", "why": "JWT 签名密钥泄露可伪造任意用户令牌（含 admin），必须轮换"},
+    # UPLOADS_KEY 泄露 = 存量简历原件全部可解；轮换必须先批量重加密（scripts/encrypt_uploads.py）
+    {"field": "uploads_key", "why": "简历原件加密密钥泄露则存量原件全部可解，轮换需先重新加密存量"},
     {"field": "DATABASE_URL", "why": "生产库口令随 URL 下发，需与开发库口令分离"},
     {"field": "REDIS_URL", "why": "broker 承载任务与结果，生产必须设密码并禁止公网暴露"},
 ]
@@ -150,6 +154,26 @@ def _infra_checks(config) -> list[dict]:
                 "level": "warn",
                 "code": "default_ua_contact",
                 "message": f"采集 UA 仍含默认示例邮箱 {DEFAULT_UA_MARKER}，生产需替换为真实联系地址",
+            }
+        )
+
+    if not _value(config, "auth_required"):
+        # 关着也能跑：user_id 由请求参数传入，等于任何人都能读写任意用户数据（§4.3）
+        checks.append(
+            {
+                "level": "warn",
+                "code": "auth_not_required",
+                "message": "AUTH_REQUIRED 未开启：用户态接口仍接受请求参数里的 user_id，生产建议置 true",
+            }
+        )
+
+    if not _text(_value(config, "uploads_key")):
+        # 隐私政策第四节如实披露了“未加密”，但生产应尽快配上：磁盘/快照被拿走就是明文简历
+        checks.append(
+            {
+                "level": "warn",
+                "code": "uploads_plaintext",
+                "message": "UPLOADS_KEY 未配置：简历原件明文落盘（磁盘/快照泄露即等于泄露简历）",
             }
         )
     return checks
