@@ -3,7 +3,8 @@
 可移植性约定：
 - 主键：Integer().with_variant(BigInteger, "postgresql")，SQLite 下正常自增；
 - JSON：JSON().with_variant(JSONB, "postgresql")；
-- PGVector 向量列（jobs.vector）按文档属二期，暂不建模。
+- PGVector 向量列（jobs.vector）不进 ORM：SQLite 无此类型，由 services/vector_store.py
+  在 PG 上 raw SQL 幂等建列与读写（§7 二期，列不定维，维度门禁在应用层）。
 """
 
 from __future__ import annotations

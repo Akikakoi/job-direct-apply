@@ -13,5 +13,9 @@ playwright           # 半自动帮填（装后需: playwright install chromium�
 pymupdf              # 扫描件 OCR：PDF 页渲染为图片
 cryptography         # §10 简历原件静态加密（AES-GCM，应用层密钥 app/services/crypto.py）
 
-# 切换 PostgreSQL 时安装（生产化迁移见 scripts/migrate_sqlite_to_pg.py）：
+# 切换 PostgreSQL 时安装（生产化迁移见 scripts/migrate_sqlite_to_pg.py；
+# PG 集成测试也用：JDA_TEST_PG_URL=postgresql+psycopg2://jda:jda@localhost:5432/jda）：
 # psycopg2-binary
+
+# §7 二期 PGVector 多语嵌入（可选，不装则 EMBEDDINGS_PROVIDER 必须保持 none）：
+# sentence-transformers   # 含 torch 约 2GB；模型 BAAI/bge-m3 首次运行自动下载（约 2.3GB）

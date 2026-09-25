@@ -2,8 +2,12 @@
 
 四分项规则分：
     rule = w_skill*skill_hit + w_city*city_fit + w_exp*exp_fit + w_role*role_fit
-融合分（§7 二期阉割版，γ*llm 留位）：
-    final = alpha * rule + beta * vec    # vec = TF-IDF 余弦（semantic.py）
+融合分（§7，γ*llm 留位）：
+    final = alpha * rule + beta * vec
+vec 分双路（build_vec_map 统一出口，match 与 tuning 同源）：
+- 默认 TF-IDF 余弦（零依赖、离线可测，见 semantic.py）；
+- §7 二期：EMBEDDINGS_PROVIDER 配置 + PGVector 就绪 → pgvector `<=>` 多语嵌入余弦
+  （services/embeddings.py + vector_store.py），未就绪自动回退 TF-IDF。
 
 - skill_hit：简历技能 ∩ 职位技能 / 职位技能；两侧均为 skill_tags 标准标签
   （简历解析时已归一，见 parse.py）。任一侧为空 → 0.5 中性（无法判断不惩罚）；
@@ -212,12 +216,17 @@ def weighted_rule(parts: dict[str, float], w_skill: float, w_city: float, w_exp:
 
 
 def compute_match(
-    profile: dict, job: Job, vec_score: float | None = None, weights: "WeightSet | None" = None
+    profile: dict,
+    job: Job,
+    vec_score: float | None = None,
+    weights: "WeightSet | None" = None,
+    vec_note: str = "tfidf_cosine",
 ) -> dict:
     """算单个职位得分；vec_score 提供时做 rule/vec 融合。
 
     `weights` 缺省用 `.env` 设置（旧行为）；线上重算由 `refresh_matches*` 传入**生效权重**
     （§12.5 反馈回灌闭环：可能是被采纳过的版本，见 `services/weights.py`）。
+    `vec_note` 标注语义分来源（tfidf_cosine / embedding_cosine），进 explain 供审计。
     """
     from app.services.weights import WeightSet
 
@@ -228,13 +237,88 @@ def compute_match(
     if vec_score is None:
         return {"score": rule, "rule": rule, "explain": explain}
 
-    explain.append({"key": "semantic", "score": vec_score, "note": "tfidf_cosine"})
+    explain.append({"key": "semantic", "score": vec_score, "note": vec_note})
     final = round(w.alpha * rule + w.beta * vec_score, 4)
     return {"score": final, "rule": rule, "explain": explain}
 
 
-def _rebuild(session: Session, resume: Resume, jobs: list[Job], index: TfidfIndex, weights=None) -> int:
-    """对单份简历重建 match_scores（先删后插，幂等）；索引与权重由调用方传入复用。"""
+class _LazyTfidf:
+    """TF-IDF 索引惰性构建：向量模式下永不 fit，老路仍全量共享一次（4547 条毫秒级）。"""
+
+    def __init__(self, jobs: list[Job]) -> None:
+        self._jobs = jobs
+        self._index: TfidfIndex | None = None
+
+    def get(self) -> TfidfIndex:
+        if self._index is None:
+            self._index = TfidfIndex().fit(
+                [job_text(j.title, j.description, j.skills) for j in self._jobs]
+            )
+        return self._index
+
+
+def build_vec_map(
+    session: Session,
+    profile: dict,
+    raw_text: str | None,
+    jobs: list[Job],
+    tfidf: _LazyTfidf | None = None,
+) -> tuple[dict[int, float] | None, str]:
+    """语义分统一出口（match 与 tuning 同源，防止调参口径漂移）。
+
+    返回 (vec_map, note)：job_id → 余弦相似度；None 表示该简历无有效文本，退纯规则分。
+    向量模式（provider 配置 + PG vector 就绪）→ pgvector `<=>`；否则 TF-IDF 老路。
+    """
+    from app.services import vector_store
+    from app.services.embeddings import get_provider
+
+    provider = get_provider()  # 配置错名 fail loud（ValueError 上抛）
+    if provider is not None and vector_store.infra_ready(session):
+        return _vec_map_embedding(session, profile, raw_text, jobs, provider), "embedding_cosine"
+
+    index = (tfidf or _LazyTfidf(jobs)).get()
+    query_vec = index.build_query(resume_query_text(profile, raw_text))
+    if not query_vec:
+        return None, "tfidf_cosine"
+    return {job.id: index.similarity(i, query_vec) for i, job in enumerate(jobs)}, "tfidf_cosine"
+
+
+def _vec_map_embedding(
+    session: Session, profile: dict, raw_text: str | None, jobs: list[Job], provider
+) -> dict[int, float] | None:
+    """向量模式：简历查询文本一次嵌入，全库 active 职位 `<=>` 全量相似度。
+
+    机器兜底：职位缺向量就现场补嵌（首次全库 4547 条约数分钟，生产先跑
+    scripts/backfill_vectors.py 预热；此后仅新增职位增量嵌入）。
+    """
+    from app.services import vector_store
+
+    qtext = resume_query_text(profile, raw_text)
+    if not qtext:
+        return None
+    missing = vector_store.missing_vector_ids(session, [j.id for j in jobs])
+    if missing:
+        by_id = {j.id: j for j in jobs}
+        texts = [
+            job_text(by_id[jid].title, by_id[jid].description, by_id[jid].skills)
+            for jid in missing
+            if jid in by_id
+        ]
+        vecs = provider.embed(texts)
+        vector_store.upsert_job_vectors(session, list(zip(missing, vecs)))
+    qvec = provider.embed([qtext])[0]
+    return dict(vector_store.search_similar(session, qvec))
+
+
+def _rebuild(
+    session: Session,
+    resume: Resume,
+    jobs: list[Job],
+    vec_map: dict[int, float] | None,
+    weights=None,
+    vec_note: str = "tfidf_cosine",
+) -> int:
+    """对单份简历重建 match_scores（先删后插，幂等）；vec_map 与权重由调用方传入复用。"""
     if weights is None:
         from app.services.weights import active_weights
 
@@ -242,13 +326,10 @@ def _rebuild(session: Session, resume: Resume, jobs: list[Job], index: TfidfInde
     session.execute(delete(MatchScore).where(MatchScore.resume_id == resume.id))
     profile = resume.profile or {}
 
-    query_vec = index.build_query(resume_query_text(profile, resume.raw_text))
-    use_semantic = bool(query_vec)  # 简历无有效文本时退纯规则分
-
     rows = []
-    for i, job in enumerate(jobs):
-        sim = index.similarity(i, query_vec) if use_semantic else None
-        result = compute_match(profile, job, vec_score=sim, weights=weights)
+    for job in jobs:
+        sim = vec_map.get(job.id) if vec_map else None
+        result = compute_match(profile, job, vec_score=sim, weights=weights, vec_note=vec_note)
         rows.append(
             MatchScore(
                 resume_id=resume.id,
@@ -267,21 +348,25 @@ def _rebuild(session: Session, resume: Resume, jobs: list[Job], index: TfidfInde
 def refresh_matches(session: Session, resume: Resume) -> int:
     """重算该简历对全部 active 职位的融合分，先删后插（幂等）。
 
-    TF-IDF 索引每次重建（3470 条毫秒级），切 PG/向量模型时只换此实现。
+    语义分经 `build_vec_map` 统一出口：provider+PGVector 就绪走向量，否则 TF-IDF。
     权重取**当前生效版本**（§12.5 闭环：可能来自被采纳的权重版本）。
     """
     from app.services.weights import active_weights
 
     jobs = session.execute(select(Job).where(Job.status == "active")).scalars().all()
-    index = TfidfIndex().fit([job_text(j.title, j.description, j.skills) for j in jobs])
-    return _rebuild(session, resume, jobs, index, weights=active_weights(session))
+    vec_map, vec_note = build_vec_map(
+        session, resume.profile or {}, resume.raw_text, jobs
+    )
+    return _rebuild(
+        session, resume, jobs, vec_map, weights=active_weights(session), vec_note=vec_note
+    )
 
 
 def refresh_matches_all(session: Session, resumes: list[Resume] | None = None) -> int:
     """全量简历重算（挂账销项：职位新增/更新/过期后由采集侧触发）。
 
-    TF-IDF 索引只建一次，多份简历共享（4547 条职位 × N 份简历仍秒级）。
-    返回重算的 match_scores 总行数；无简历时返回 0。
+    TF-IDF 索引惰性构建只一次，多份简历共享（4547 条职位 × N 份简历仍秒级）；
+    向量模式下完全不 fit TF-IDF。返回重算的 match_scores 总行数；无简历时返回 0。
     """
     if resumes is None:
         resumes = session.execute(select(Resume)).scalars().all()
@@ -291,5 +376,9 @@ def refresh_matches_all(session: Session, resumes: list[Resume] | None = None) -
 
     weights = active_weights(session)
     jobs = session.execute(select(Job).where(Job.status == "active")).scalars().all()
-    index = TfidfIndex().fit([job_text(j.title, j.description, j.skills) for j in jobs])
-    return sum(_rebuild(session, r, jobs, index, weights=weights) for r in resumes)
+    tfidf = _LazyTfidf(jobs)
+    total = 0
+    for r in resumes:
+        vec_map, vec_note = build_vec_map(session, r.profile or {}, r.raw_text, jobs, tfidf=tfidf)
+        total += _rebuild(session, r, jobs, vec_map, weights=weights, vec_note=vec_note)
+    return total

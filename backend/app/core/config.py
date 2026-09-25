@@ -77,6 +77,15 @@ class Settings(BaseSettings):
     weights_auto_tune_step: float = 0.1      # 网格粒度（与 /api/insights/tuning 同义）
     weights_auto_tune_k: int = 10            # 评估用的 NDCG@k
 
+    # §7 二期 PGVector 多语嵌入（默认关：provider=none 走 TF-IDF 老路，零依赖不变）
+    # 开启前提：PG（pgvector 扩展）+ pip install sentence-transformers + 模型下载
+    # 换模型时 EMBEDDINGS_MODEL 与 EMBEDDINGS_DIM 必须同步改（BGE-M3=1024，MiniLM 多语=384）
+    embeddings_provider: str = "none"            # none | sentence_transformers
+    embeddings_model: str = "BAAI/bge-m3"        # 多语模型（HF 名）
+    embeddings_dim: int = 1024                   # 与模型产出维度一致（读写门禁）
+    embeddings_device: str = "cpu"               # 无 GPU 机器默认 cpu
+    embeddings_batch_size: int = 32
+
     # P3 投递催进：pending 状态卡超过 T 个自然日进入提醒（§8，T 天默认值挂账销项）
     reminder_after_days: int = 3
 

@@ -29,7 +29,6 @@ from sqlalchemy.orm import Session
 
 from app.models import Application, Job, Resume
 from app.pipelines.match import match_parts, weighted_rule
-from app.pipelines.semantic import TfidfIndex, job_text, resume_query_text
 from app.services.insights import GRADED_RELEVANCE, latest_outcomes, ndcg, weights_snapshot
 
 WEIGHT_KEYS = ("skill", "city", "exp", "role")
@@ -72,7 +71,11 @@ def collect_samples(session: Session) -> dict:
         return {"resumes": [], "jobs": 0}
 
     jobs = session.execute(select(Job).where(Job.status == "active")).scalars().all()
-    index = TfidfIndex().fit([job_text(j.title, j.description, j.skills) for j in jobs])
+    # 语义分与线上同源（match.build_vec_map）：向量模式 → pgvector `<=>`，否则 TF-IDF。
+    # TF-IDF 索引惰性构建且全量共享，N 份简历只 fit 一次；向量模式完全不 fit。
+    from app.pipelines.match import _LazyTfidf, build_vec_map
+
+    tfidf = _LazyTfidf(jobs)
 
     samples: list[dict] = []
     for rid in resume_ids:
@@ -80,10 +83,10 @@ def collect_samples(session: Session) -> dict:
         if resume is None:
             continue
         profile = resume.profile or {}
-        query_vec = index.build_query(resume_query_text(profile, resume.raw_text))
+        vec_map, _ = build_vec_map(session, profile, resume.raw_text, jobs, tfidf=tfidf)
         rows = [
-            (job.id, match_parts(profile, job), index.similarity(i, query_vec) if query_vec else None)
-            for i, job in enumerate(jobs)
+            (job.id, match_parts(profile, job), vec_map.get(job.id) if vec_map else None)
+            for job in jobs
         ]
         samples.append({"resume_id": rid, "relevance": relevance[rid], "rows": rows})
     return {"resumes": samples, "jobs": len(jobs)}
