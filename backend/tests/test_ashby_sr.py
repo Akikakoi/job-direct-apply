@@ -59,7 +59,13 @@ def test_ashby_discover_and_normalize():
     assert n.to_row()["source"] == "ashby"
 
 
-def test_sr_pagination_and_normalize():
+def test_sr_pagination_and_normalize(monkeypatch):
+    from app.core import config
+
+    # 密闭性（第二十九轮）：本用例断言"翻两页、不取详情、description 为 None"，
+    # 必须显式关掉详情补齐——.env 里 SR_FETCH_DETAILS=true 时，这里会多出 101 次
+    # 详情请求，断言随环境而变。与 test_sr_detail_enrich 的显式开启对称。
+    monkeypatch.setattr(config.settings, "sr_fetch_details", False)
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
