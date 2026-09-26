@@ -143,7 +143,9 @@ def test_apply_persists_version_and_rematch_uses_new_weights(session):
         _select(MatchScore).where(MatchScore.job_id == job_b.id)
     ).scalars().one()
     assert float(before.rule_score) == 0.35  # 基线（skill=0.5）：B 只有城市分 0.2 + 经验中性 0.15
-    assert float(before.final_score) == 0.26  # final = alpha*rule + beta*vec（vec=0 → 0.75*0.35）
+    # final = alpha*rule + beta*vec（vec=0 → 0.75*0.35 = 0.2625）。列宽 Numeric(6,4) 后
+    # 四位小数不再被截断（旧 Numeric(5,2) 下这里只能读到 0.26，正是并列的元凶）。
+    assert float(before.final_score) == 0.2625
 
     result = apply_weights(
         session,

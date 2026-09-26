@@ -152,10 +152,13 @@ class MatchScore(Base):
     id: Mapped[int] = mapped_column(BIGPK, primary_key=True, autoincrement=True)
     resume_id: Mapped[int | None] = mapped_column(ForeignKey("resumes.id"))
     job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id"))
-    rule_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
-    vec_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
-    llm_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
-    final_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    # 精度 Numeric(6,4)（第二十七轮）：两个小数位会让人造并列——海外 1918 条里最大
+    # 同分块曾达 855 条，排序实际退化成"谁先入库"。打分侧本就 round(..., 4)，四位小数
+    # 才能把 L3 分档与权重归一的区分度落到库里（改列需 alembic 0005 + 全量重算）。
+    rule_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
+    vec_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
+    llm_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
+    final_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
     explain: Mapped[dict | None] = mapped_column(JSONType)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

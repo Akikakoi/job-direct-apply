@@ -194,7 +194,8 @@ def test_weight_normalization_overseas_drops_skill_and_city(session, monkeypatch
 def test_tie_break_key_sub_score_priority():
     """L4：final/rule 并列时按 role 原始分 → skill 命中数 → 时间 → id 排序。
 
-    分数落库是 Numeric(5,2)（两位小数），大面积并列是常态，故并列键不是可选装饰。
+    分数落库自第二十七轮起是 Numeric(6,4)（四位小数），精度提升后**大幅**减少并列，
+    但并未消除（vec=0 且 rule 相同的职位仍会同分），故并列键不是可选装饰。
     """
     from datetime import datetime, timezone
 
@@ -327,3 +328,16 @@ def test_profile_update_triggers_rematch(session, client):
 def test_recommend_404(session, client):
     resp = client.get("/api/recommend", params={"resume_id": 9999})
     assert resp.status_code == 404
+
+
+def test_match_score_columns_keep_four_decimals():
+    """第二十七轮：分数列必须是 Numeric(6,4)——把"两位小数造成人造并列"钉死。
+
+    旧列宽 Numeric(5,2) 会把 final_score 量化成 0.01 的整数倍（海外 1918 条只剩
+    ~39 个不同取值、最大同分块 855 条），排序实际退化成 updated_at；而打分侧本来就是
+    round(..., 4)，属于**存储**丢精度。改列需配套 alembic 0005 + 全量重算 match_scores，
+    本用例是防止无声回退的第一道闸。
+    """
+    for col in ("rule_score", "vec_score", "llm_score", "final_score"):
+        t = MatchScore.__table__.c[col].type
+        assert (t.precision, t.scale) == (6, 4), f"{col} 精度回退: {t}"
