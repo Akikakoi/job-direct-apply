@@ -144,6 +144,71 @@ def test_role_fit_generic_word_does_not_promote_off_target(session):
     assert role["score"] == 0.0 and role["tier"] == "off_target"
 
 
+def test_role_family_judged_on_title_head_not_tail(session):
+    """第二十八轮：族判定只看标题主段——尾段是领域/团队修饰词。
+
+    实测海外 top10 里混进 `Staff Data Scientist, Security`：主职能是 data，却因尾段
+    "Security" 命中工程族词表拿到 family_peer 0.85，rule 冲到 0.925 挤掉真对口岗。
+    只看主段（第一个逗号之前）后正确落回相邻族 0.4。
+    """
+
+    def _role(title: str) -> dict:
+        job = _add_job(session, title, "San Francisco, CA", ["python"])
+        return next(e for e in compute_match(PROFILE, job)["explain"] if e["key"] == "role")
+
+    assert _role("Staff Data Scientist, Security")["tier"] == "adjacent_family"
+    assert _role("Staff Data Scientist, Security")["score"] == 0.4
+    # 主段本身是工程族时不受影响（尾段领域词照旧）
+    assert _role("Backend Engineer, Security")["tier"] == "exact"  # 精确命中优先，走不到分档
+
+
+def test_off_words_match_english_plurals(session):
+    """第二十八轮：off-word 词表必须认复数。
+
+    旧 `_word_pattern` 的 `(?![a-z0-9])` 右边界让 "therapist" 匹配不上
+    "therapists"——实测海外最大并列块（637 行）里 62 条 "Pilates Instructors"、
+    19 条 "Licensed Massage Therapists" 因此躲过词表，落进 unrecognized 档 0.2，
+    与 "Engineering Manager" 这类真·泛称岗混在同一档。
+    """
+
+    def _role(title: str) -> dict:
+        job = _add_job(session, title, "San Francisco, CA", ["python"])
+        return next(e for e in compute_match(PROFILE, job)["explain"] if e["key"] == "role")
+
+    assert _role("Pilates Instructors")["score"] == 0.0
+    assert _role("Licensed Massage Therapists")["tier"] == "off_target"
+    assert _role("Studio Crew")["score"] == 0.0
+    # 复数支持不能把正常工程岗误伤
+    assert _role("Software Engineers, Platform")["tier"] == "family_generic"
+
+
+def test_title_head_split_keeps_hyphenated_core(session):
+    """主段切分刻意不按裸连字符："Full-Stack Engineer" 不能被切成 "Full"。"""
+    job = _add_job(session, "Full-Stack Engineer", "San Francisco, CA", ["python"])
+    role = next(e for e in compute_match(PROFILE, job)["explain"] if e["key"] == "role")
+    assert role["tier"] == "family_peer" and role["score"] == 0.85
+
+
+def test_cross_lingual_function_bridge_gives_generic_title_nonzero_vec():
+    """第二十八轮：英文标题的泛称职能词（engineer/software）投影到中文核心词。
+
+    实测海外 1533/1920 条 description + skills 双空，语义分只剩 5~9 个标题 token；
+    泛称层不投影时中文简历与 "Staff Software Engineer, ..." 零交集 → vec 恒 0。
+    """
+    from app.pipelines.semantic import TfidfIndex, job_text, resume_query_text
+
+    docs = [
+        job_text("Staff Software Engineer, Payments Intelligence", None, []),
+        job_text("Personal Trainer", None, []),
+    ]
+    index = TfidfIndex().fit(docs)
+    query = index.build_query(
+        resume_query_text({"skills": ["backend"], "target_role": "后端工程师", "cities": []}, None)
+    )
+    assert index.similarity(0, query) > 0  # 泛称工程岗：桥补出 工程/软件/支付
+    assert index.similarity(1, query) == 0  # 无关岗仍是真·零重叠，不被人造交集抬起来
+
+
 def test_weight_normalization_gated_behind_flag(session, monkeypatch):
     """L1+L2 权重归一挂在 WEIGHTS_AUTO_TUNE 后面：关 = 旧口径逐位一致，开 = 权重摊给其余项。"""
     from app.core.config import settings

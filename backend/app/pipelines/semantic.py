@@ -64,11 +64,57 @@ _CROSS_LINGUAL: dict[str, tuple[str, ...]] = {
     "医疗": ("healthcare", "medical"),
 }
 
+# 职能/领域泛称投影（第二十八轮）：上表只覆盖"岗位大类"，实测海外 1920 条里
+# 1533 条（79.8%）description + skills 双空，语义分只剩 5~9 个标题 token；而标题
+# 的主流写法是「泛称职能 + 领域修饰」（"Staff Software Engineer, Payments
+# Intelligence"）。泛称层没投影时，中文简历与这类标题零交集 → vec 恒 0 → 640~1560
+# 行的并列块（**100% 海外、100% vec=0**）。
+#
+# 这里把泛称职能词与常见领域词也做成双向投影：英文标题里的 engineer/software/
+# platform 补出中文核心词，中文简历里的"工程/软件/平台"补出英文写法。实测海外
+# vec>0 占比 7.3% → 30.1%，最大并列块 725 → 621 行。
+#
+# 取舍：这些词**分辨力弱于技能术语**（"Engineer" 对任何工程岗都成立），只加"是否
+# 沾边"的信号、不加"多相关"的信号——故不放进技能标签口径，只影响语义分。
+_CROSS_LINGUAL_FUNCTION: dict[str, tuple[str, ...]] = {
+    # 工程侧职能泛称
+    "工程": ("engineer", "engineering"),
+    "软件": ("software", "sde"),
+    "平台": ("platform",),
+    "系统": ("systems", "system"),
+    "开发": ("developer", "development"),
+    "基础设施": ("infrastructure", "infra"),
+    # 其他族职能泛称
+    "设计": ("design", "designer", "ux", "ui"),
+    "经理": ("manager",),
+    "总监": ("director",),
+    "专员": ("specialist",),
+    "分析": ("analyst", "analytics", "analysis"),
+    # 领域/业务词（英文标题尾段与中文简历正文高频）
+    "战略": ("strategy", "strategic"),
+    "支持": ("support",),
+    "风控": ("risk",),
+    "合规": ("compliance",),
+    "招聘": ("recruit", "recruiting", "hiring"),
+    "客户": ("customer",),
+    "合作伙伴": ("partner", "partners", "partnership", "partnerships"),
+    "咨询": ("consulting", "consultant"),
+    "支付": ("payments", "payment", "billing"),
+    "保险": ("insurance",),
+    "零售": ("retail",),
+    "制造": ("manufacturing",),
+    "物流": ("logistics",),
+    "教育": ("education",),
+}
+
+# 词表合并视图：tokenize / 反向桥 / 正向桥统一从这里取，避免三处各写一遍
+_CROSS_LINGUAL_ALL: dict[str, tuple[str, ...]] = {**_CROSS_LINGUAL, **_CROSS_LINGUAL_FUNCTION}
+
 
 def _build_reverse_index() -> list[tuple[re.Pattern[str], str]]:
     """英文术语 → 中文核心词（反向桥）：同义词撞车时保留首个（如 server → 后端）。"""
     pairs: dict[str, str] = {}
-    for zh, terms in _CROSS_LINGUAL.items():
+    for zh, terms in _CROSS_LINGUAL_ALL.items():
         for en in terms:
             pairs.setdefault(en, zh)
     # 词边界匹配：避免 "web" 命中 "website"、"qa" 命中 "qatar" 一类子串误判
@@ -86,7 +132,7 @@ def cross_lingual_tokens(text: str) -> list[str]:
         return []
     lowered = text.lower()
     extra: list[str] = []
-    for zh, terms in _CROSS_LINGUAL.items():
+    for zh, terms in _CROSS_LINGUAL_ALL.items():
         if zh in text:
             extra.extend(terms)
     for pattern, zh in _REVERSE_BRIDGE:

@@ -105,7 +105,7 @@ _ROLE_FAMILY_MEMBERS: dict[str, list[str]] = {
 # 本族泛称：不特指某个职能、但明确属于该族的词。单独一档是因为
 # "Software Engineer" 对任何工程职能都算匹配，却不该压过"后端"这种精确命中。
 _ROLE_FAMILY_GENERIC: dict[str, list[str]] = {
-    "engineering": ["software", "platform", "infrastructure", "infra", "systems", "sde"],
+    "engineering": ["software", "platform", "infrastructure", "infra", "systems", "sde", "engineer", "engineering"],
     "data": ["machine learning", "analytics", "artificial intelligence"],
     "product": ["growth"],
     "business": ["account manager", "accountant", "payroll", "accounts payable", "recruiter", "talent"],
@@ -121,10 +121,26 @@ _ROLE_ADJACENT: dict[str, set[str]] = {
 }
 
 # 明确无关职能词：不属于上述任何族、但一眼看出与本产品用户群（技术求职者）
-# 无关的门店/后勤岗。它们是"见过了、明确不要"，不是"命名没见过" → 0.0。
+# 无关的门店/后勤/健身服务业岗。它们是"见过了、明确不要"，不是"命名没见过" → 0.0。
+#
+# 第二十八轮实测扩容：海外最大并列块（637 行）里 tier 全是 unrecognized_title，
+# 内容 ~90% 是同一家公司（Equinox）的健身/门店岗——pilates instructors / style
+# advisors / front desk associates / studio crew / massage therapists / lifeguards /
+# estheticians / kids club associates…。旧词表只覆盖 15 个词且漏掉复数，等于把
+# 这些岗和"engineering manager"这种真·泛称岗混在同一档 0.2 里。
+# 只加"技术岗位标题里绝不会出现"的词；"associate/manager/lead/advisor" 这类
+# 兼职级/职级语的**不进**——它们会误伤 "Associate Software Engineer"。
 _ROLE_OFF_WORDS = (
-    "trainer", "spa", "locker", "barista", "cashier", "nurse", "driver", "cook",
-    "stylist", "therapist", "coach", "attendant", "janitor", "housekeeping", "valet",
+    # 健身/运动/美容（Equinox 类）
+    "trainer", "coach", "coaching", "instructor", "pilates", "yoga", "cycling",
+    "massage", "therapist", "esthetician", "lifeguard", "salon", "spa", "wellness",
+    "fitness", "gym", "studio", "crew", "locker", "membership",
+    # 门店/前台/后勤
+    "barista", "cashier", "stylist", "attendant", "janitor", "housekeeping", "valet",
+    "desk", "receptionist", "concierge", "doorman", "bellman", "bartender",
+    "dishwasher", "laundry", "maintenance", "cleaner", "nanny", "kids",
+    # 其他明确无关专业
+    "nurse", "driver", "cook", "chef", "culinary", "sommelier",
 )
 
 # 跨族同形词："operations" 同时挂在 运维（工程族）与 运营（产品族）下，参与族判定
@@ -134,11 +150,29 @@ _ROLE_FAMILY_AMBIGUOUS = {"operations"}
 
 _ASCII_ONLY_RE = re.compile(r"[a-z0-9][a-z0-9 .,+#/&-]*")
 
+# 标题主段切分（第二十八轮 L3 修正）：主职能几乎总在第一个分隔符之前，其后的片段
+# 是领域/团队/地点修饰。族判定只看主段——实测 "Staff Data Scientist, Security"
+# 因尾段 "Security" 被判工程族 family_peer 0.85，rule 冲到 0.925，把无关岗推进
+# 入门简历的 top-10。只看主段后它正确落回相邻族 0.4。
+# 刻意**不**按裸连字符切："Full-Stack Engineer" 会被切成 "Full"。
+_TITLE_HEAD_SPLIT = re.compile(r"[,;:()\[\]|/，；：（）【】—–]|\s-\s")
+
+
+def _title_head(title_l: str) -> str:
+    """标题主段（第一个分隔符之前）；空串时退回整串，避免全分隔符标题判空。"""
+    head = _TITLE_HEAD_SPLIT.split(title_l, maxsplit=1)[0].strip()
+    return head or title_l
+
 
 def _word_pattern(word: str) -> str:
-    """ASCII 词按词边界匹配（"ui" 不能命中 "build"）；CJK 词直接用子串。"""
+    """ASCII 词按词边界匹配（"ui" 不能命中 "build"）；CJK 词直接用子串。
+
+    英文**复数**必须认：不加 `s?` 时 "Licensed Massage Therapists"（19 条）、
+    "Pilates Instructors"（62 条）都躲过 off-word 词表，落进 unrecognized 档——
+    实测这是海外最大并列块（637 行）里的头两名来源。
+    """
     if _ASCII_ONLY_RE.fullmatch(word):
-        return rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])"
+        return rf"(?<![a-z0-9]){re.escape(word)}s?(?![a-z0-9])"
     return re.escape(word)
 
 
@@ -209,7 +243,11 @@ def _adjacent_family_hit(family: str, title_l: str) -> bool:
 
 
 def _role_related(role_l: str, title_l: str, explain: list[dict], role: str, job: Job) -> float:
-    """精确未命中时的分档（L3）。返回 0.85/0.6/0.4/0.2/0.0。"""
+    """精确未命中时的分档（L3）。返回 0.85/0.6/0.4/0.2/0.0。
+
+    族判定只用**标题主段**（`_title_head`）：尾段是领域/团队修饰词，不该把岗位
+    "升级"成工程族（第二十八轮实测的 "Data Scientist, Security" 误判）。
+    """
     family = _family_of_target(role_l)
     if family is None:
         # target_role 本身不在词表内 → 无从判断"相关"，不假装分档，保持二值老行为
@@ -218,18 +256,19 @@ def _role_related(role_l: str, title_l: str, explain: list[dict], role: str, job
         )
         return 0.0
 
+    head = _title_head(title_l)
     tier = None
-    if family in _ROLE_FAMILY_PATTERNS and _ROLE_FAMILY_PATTERNS[family].search(title_l):
+    if family in _ROLE_FAMILY_PATTERNS and _ROLE_FAMILY_PATTERNS[family].search(head):
         tier, score = "family_peer", 0.85
-    elif _other_family_hit(family, title_l) and not _adjacent_family_hit(family, title_l):
+    elif _other_family_hit(family, head) and not _adjacent_family_hit(family, head):
         # 非相邻他族 + 明确无关词表 → 0；先于泛称档判断，避免 "Software Sales"
         # 因 "software" 被当成工程岗
         tier, score = "off_target", 0.0
-    elif _ROLE_OFF_PATTERN is not None and _ROLE_OFF_PATTERN.search(title_l):
+    elif _ROLE_OFF_PATTERN is not None and _ROLE_OFF_PATTERN.search(head):
         tier, score = "off_target", 0.0
-    elif _adjacent_family_hit(family, title_l):
+    elif _adjacent_family_hit(family, head):
         tier, score = "adjacent_family", 0.4
-    elif family in _ROLE_GENERIC_PATTERNS and _ROLE_GENERIC_PATTERNS[family].search(title_l):
+    elif family in _ROLE_GENERIC_PATTERNS and _ROLE_GENERIC_PATTERNS[family].search(head):
         tier, score = "family_generic", 0.6
     else:
         tier, score = "unrecognized_title", 0.2
