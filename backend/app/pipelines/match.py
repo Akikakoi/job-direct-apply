@@ -68,7 +68,176 @@ _ROLE_SYNONYMS: dict[str, list[str]] = {
     "销售": ["sales", "account executive"],
     "财务": ["finance", "accounting"],
     "人力": ["human resources", "recruiting", "hr"],
+    # 第二十五轮补齐：这三族在库内 title 里高频出现（"Software Engineer"、
+    # "Platform Engineer"、"Infrastructure Engineer"），此前不在表内 → 中文
+    # target_role（软件/平台/基础设施）对英文 title 恒 0。
+    "软件": ["software"],
+    "平台": ["platform"],
+    "基础设施": ["infrastructure", "infra"],
 }
+
+# ---------- L3 职能族（第二十五轮）：把 role 分从 0/1 二值展开成梯度 ----------
+# 动机（实测）：海外 1918 条里 role 是唯一真信号，二值化后"精确命中 1.0 / 其余
+# 0.0"把绝大多数职位压成同一个分数——前 10 名门槛上并列近百条，真正决定出场
+# 顺序的退化成 updated_at。分档后「同族其他职能 > 本族泛称 > 相邻族 > 未识别 >
+# 明确非目标」可比，并列被打开。
+#
+# 档位（分值手拍，只保证**单调有序**：同一份简历下更相关的岗位分更高）：
+#     1.00 同职能精确命中（核心词/同义词/中英互查，与旧行为一致，不引入语言偏置）
+#     0.85 同族其他具体职能（后端简历看到 前端/移动/测试/运维/架构/安全）
+#     0.60 本族泛称（software / platform / infrastructure / full stack）
+#     0.40 相邻族（工程 ↔ 数据）
+#     0.20 未识别（title 里没有任何已知职能词）
+#     0.00 明确非目标（命中他族职能词或明确无关岗词表）
+#
+# 两个刻意的设计：
+# - **未识别给 0.2 而不是 0**：英文 title 命名极其发散，"没见过"不等于"不相关"，
+#   给 0 会把所有新命名一次性打死；
+# - **同义词仍给 1.0**：把"同义词"降到 0.85 会让中文 target_role 配英文 title
+#   系统性吃亏（正是 §12.7 #9 C 修掉的语言偏置），故不按"是否同义"分档。
+_ROLE_FAMILY_MEMBERS: dict[str, list[str]] = {
+    "engineering": ["后端", "前端", "全栈", "移动", "测试", "运维", "架构", "安全"],
+    "data": ["数据", "算法"],
+    "product": ["产品", "设计", "运营"],
+    "business": ["销售", "财务", "人力"],
+}
+
+# 本族泛称：不特指某个职能、但明确属于该族的词。单独一档是因为
+# "Software Engineer" 对任何工程职能都算匹配，却不该压过"后端"这种精确命中。
+_ROLE_FAMILY_GENERIC: dict[str, list[str]] = {
+    "engineering": ["software", "platform", "infrastructure", "infra", "systems", "sde"],
+    "data": ["machine learning", "analytics", "artificial intelligence"],
+    "product": ["growth"],
+    "business": ["account manager", "accountant", "payroll", "accounts payable", "recruiter", "talent"],
+}
+
+# 相邻族：技能栈相邻的常见换岗路径（工程 ↔ 数据、产品 ↔ 运营）；其余跨族按
+# "明确非目标"处理。
+_ROLE_ADJACENT: dict[str, set[str]] = {
+    "engineering": {"data"},
+    "data": {"engineering"},
+    "product": {"business"},
+    "business": {"product"},
+}
+
+# 明确无关职能词：不属于上述任何族、但一眼看出与本产品用户群（技术求职者）
+# 无关的门店/后勤岗。它们是"见过了、明确不要"，不是"命名没见过" → 0.0。
+_ROLE_OFF_WORDS = (
+    "trainer", "spa", "locker", "barista", "cashier", "nurse", "driver", "cook",
+    "stylist", "therapist", "coach", "attendant", "janitor", "housekeeping", "valet",
+)
+
+# 跨族同形词："operations" 同时挂在 运维（工程族）与 运营（产品族）下，参与族判定
+# 会把 "Business Operations Manager" 判成工程岗。精确命中路径仍按 _ROLE_SYNONYMS
+# 走（那边不受影响），只是不拿它判族。
+_ROLE_FAMILY_AMBIGUOUS = {"operations"}
+
+_ASCII_ONLY_RE = re.compile(r"[a-z0-9][a-z0-9 .,+#/&-]*")
+
+
+def _word_pattern(word: str) -> str:
+    """ASCII 词按词边界匹配（"ui" 不能命中 "build"）；CJK 词直接用子串。"""
+    if _ASCII_ONLY_RE.fullmatch(word):
+        return rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])"
+    return re.escape(word)
+
+
+def _alternation(words) -> re.Pattern | None:
+    pats = [
+        _word_pattern(w.lower())
+        for w in words
+        if w and w.lower() not in _ROLE_FAMILY_AMBIGUOUS
+    ]
+    return re.compile("|".join(pats)) if pats else None
+
+
+def _family_words(family: str) -> list[str]:
+    """族的具体职能词 = 成员核心词 + 各自的同义词（英文写法一并算具体职能）。"""
+    words: list[str] = []
+    for member in _ROLE_FAMILY_MEMBERS[family]:
+        words.append(member)
+        words.extend(_ROLE_SYNONYMS.get(member, []))
+    return words
+
+
+_ROLE_FAMILY_PATTERNS: dict[str, re.Pattern] = {
+    f: p for f in _ROLE_FAMILY_MEMBERS if (p := _alternation(_family_words(f))) is not None
+}
+_ROLE_GENERIC_PATTERNS: dict[str, re.Pattern] = {
+    f: p for f in _ROLE_FAMILY_GENERIC if (p := _alternation(_ROLE_FAMILY_GENERIC[f])) is not None
+}
+_ROLE_OFF_PATTERN = _alternation(_ROLE_OFF_WORDS)
+
+
+def _family_of_target(role_l: str) -> str | None:
+    """target_role 所属族：先找具体职能词（取最先出现者），再退到泛称词。
+
+    不只看剥完修饰/后缀的 `essential`——"AI 后端开发实习生"剥完仍是长串，
+    但里面明明有"后端"，按整串查不到族会让 7/12 份简历直接掉回二值老路。
+    """
+    best: tuple[int, str] | None = None
+    for family, pat in _ROLE_FAMILY_PATTERNS.items():
+        m = pat.search(role_l)
+        if m and (best is None or m.start() < best[0]):
+            best = (m.start(), family)
+    if best is not None:
+        return best[1]
+    for family, pat in _ROLE_GENERIC_PATTERNS.items():
+        if pat.search(role_l):
+            return family
+    return None
+
+
+def _other_family_hit(family: str, title_l: str) -> bool:
+    """title 里是否出现了**非本族**的职能词（具体职能词或泛称词都算）。"""
+    for other in _ROLE_FAMILY_MEMBERS:
+        if other != family and _ROLE_FAMILY_PATTERNS[other].search(title_l):
+            return True
+    for other in _ROLE_FAMILY_GENERIC:
+        if other != family and other in _ROLE_GENERIC_PATTERNS and _ROLE_GENERIC_PATTERNS[other].search(title_l):
+            return True
+    return False
+
+
+def _adjacent_family_hit(family: str, title_l: str) -> bool:
+    for other in _ROLE_ADJACENT.get(family, set()):
+        if other in _ROLE_FAMILY_PATTERNS and _ROLE_FAMILY_PATTERNS[other].search(title_l):
+            return True
+        if other in _ROLE_GENERIC_PATTERNS and _ROLE_GENERIC_PATTERNS[other].search(title_l):
+            return True
+    return False
+
+
+def _role_related(role_l: str, title_l: str, explain: list[dict], role: str, job: Job) -> float:
+    """精确未命中时的分档（L3）。返回 0.85/0.6/0.4/0.2/0.0。"""
+    family = _family_of_target(role_l)
+    if family is None:
+        # target_role 本身不在词表内 → 无从判断"相关"，不假装分档，保持二值老行为
+        explain.append(
+            {"key": "role", "score": 0.0, "target_role": role, "job_title": job.title, "tier": "unknown_target_role"}
+        )
+        return 0.0
+
+    tier = None
+    if family in _ROLE_FAMILY_PATTERNS and _ROLE_FAMILY_PATTERNS[family].search(title_l):
+        tier, score = "family_peer", 0.85
+    elif _other_family_hit(family, title_l) and not _adjacent_family_hit(family, title_l):
+        # 非相邻他族 + 明确无关词表 → 0；先于泛称档判断，避免 "Software Sales"
+        # 因 "software" 被当成工程岗
+        tier, score = "off_target", 0.0
+    elif _ROLE_OFF_PATTERN is not None and _ROLE_OFF_PATTERN.search(title_l):
+        tier, score = "off_target", 0.0
+    elif _adjacent_family_hit(family, title_l):
+        tier, score = "adjacent_family", 0.4
+    elif family in _ROLE_GENERIC_PATTERNS and _ROLE_GENERIC_PATTERNS[family].search(title_l):
+        tier, score = "family_generic", 0.6
+    else:
+        tier, score = "unrecognized_title", 0.2
+
+    explain.append(
+        {"key": "role", "score": score, "target_role": role, "job_title": job.title, "tier": tier, "family": family}
+    )
+    return score
 
 # 区属判定（§12.7 #9 C）：与 main.DOMESTIC_SOURCES 保持一致的事实基础是
 # "国内源城市全为中文、海外源城市全为非中文"（实测 2629 / 1918 无例外），
@@ -76,12 +245,15 @@ _ROLE_SYNONYMS: dict[str, list[str]] = {
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
-def _skill_hit(profile: dict, job: Job, explain: list[dict]) -> float:
+def _skill_hit(profile: dict, job: Job, explain: list[dict], drop_unknown: bool = False) -> float | None:
     resume_skills = {str(s).lower() for s in (profile.get("skills") or [])}
     job_skills = {str(s).lower() for s in (job.skills or [])}
     if not resume_skills or not job_skills:
         explain.append({"key": "skill", "score": 0.5, "note": "skills_unknown_neutral"})
-        return 0.5
+        # L1：任一侧没有技能标签 → 这一项**不可判定**。返回 None 让 weighted_rule
+        # 把它的权重摊给其余项；否则恒 0.5 × 0.5 权重 = 0.25 常量，白占一半权重
+        # 却只贡献"有没有标签"的偏置（海外场景实测的主要并列来源）。
+        return None if drop_unknown else 0.5
     hit = sorted(resume_skills & job_skills)
     score = len(hit) / len(job_skills)
     explain.append({"key": "skill", "score": round(score, 4), "hit": hit, "missing": sorted(job_skills - resume_skills)})
@@ -131,7 +303,7 @@ def _cross_region(profile: dict, job_city: str) -> bool:
     return bool(regions) and job_region not in regions
 
 
-def _city_fit(profile: dict, job: Job, explain: list[dict]) -> float:
+def _city_fit(profile: dict, job: Job, explain: list[dict], drop_unknown: bool = False) -> float | None:
     job_city = (job.city or "").strip()
     job_city_l = job_city.lower()
     # 优先用规范化多城市索引串（city_keys，别名/多城市拆分已在采集侧展开）
@@ -141,6 +313,7 @@ def _city_fit(profile: dict, job: Job, explain: list[dict]) -> float:
         variants.extend(city_match_variants(str(c)))
     score = 0.0
     note = None
+    unknown = False
     if variants and (any(v in job_keys_l for v in variants if v) or any(v in job_city_l for v in variants)):
         score = 1.0
     elif "remote" in job_city_l or "远程" in job_city:
@@ -149,13 +322,16 @@ def _city_fit(profile: dict, job: Job, explain: list[dict]) -> float:
     elif not job_city or job_city.upper() == "N/A":
         score = 0.5
         note = "city_unknown_neutral"
+        unknown = True
     elif _cross_region(profile, job_city):
         # §12.7 #9 C：跨区不可比（简历只写了国内意向，不等于拒绝海外）→ 中性而非 0。
         # 同区不同城市（杭州 vs 乌鲁木齐）走到最后一行，仍是 0 明确不匹配。
         score = 0.5
         note = "cross_region_neutral"
+        unknown = True
     explain.append({"key": "city", "score": score, "job_city": job_city or None, "resume_cities": profile.get("cities") or [], **({"note": note} if note else {})})
-    return score
+    # L1：城市未知/跨区不可比 → 这一项判不出来，交权重归一化（同 _skill_hit）
+    return None if (unknown and drop_unknown) else score
 
 
 def _role_candidates(core: str, essential: str) -> list[str]:
@@ -189,30 +365,66 @@ def _role_fit(profile: dict, job: Job, explain: list[dict]) -> float:
     title_l = (job.title or "").lower()
     candidates = _role_candidates(core, essential)
     hit = next((c for c in candidates if c and c in title_l), None)
-    score = 1.0 if hit else 0.0
-    explain.append(
-        {"key": "role", "score": score, "target_role": role, "job_title": job.title, **({"core": hit} if hit else {})}
-    )
-    return score
+    if hit:
+        explain.append(
+            {
+                "key": "role",
+                "score": 1.0,
+                "target_role": role,
+                "job_title": job.title,
+                "core": hit,
+                "tier": "exact",
+            }
+        )
+        return 1.0
+    # 精确未命中 → 走职能族分档（L3），不再一律 0
+    return _role_related(role.lower(), title_l, explain, role, job)
 
 
-def match_parts(profile: dict, job: Job, explain: list[dict] | None = None) -> dict[str, float]:
-    """四分项**原始分**（不含权重）——加权求和与调参/看板共用的唯一打分源。"""
+def match_parts(
+    profile: dict,
+    job: Job,
+    explain: list[dict] | None = None,
+    drop_unknown: bool = False,
+) -> dict[str, float]:
+    """四分项**原始分**（不含权重）——加权求和与调参/看板共用的唯一打分源。
+
+    `drop_unknown=True`（L1，仅 `WEIGHTS_AUTO_TUNE` 开时）：把"不可判定"的项
+    （无技能标签 / 城市未知 / 跨区不可比）从结果里**剔除**而不是塞 0.5，由
+    `weighted_rule` 把权重让给其余项；缺省 False = 全部四项齐全的旧行为。
+    """
     expl: list[dict] = [] if explain is None else explain
-    return {
-        "skill": _skill_hit(profile, job, expl),
-        "city": _city_fit(profile, job, expl),
+    parts = {
+        "skill": _skill_hit(profile, job, expl, drop_unknown),
+        "city": _city_fit(profile, job, expl, drop_unknown),
         "exp": _exp_fit(profile, job, expl),
         "role": _role_fit(profile, job, expl),
     }
+    return {k: v for k, v in parts.items() if v is not None}
 
 
-def weighted_rule(parts: dict[str, float], w_skill: float, w_city: float, w_exp: float, w_role: float) -> float:
-    """按权重把四分项原始分合成规则分（调参网格搜索复用，保证与线上公式一致）。"""
-    return round(
-        w_skill * parts["skill"] + w_city * parts["city"] + w_exp * parts["exp"] + w_role * parts["role"],
-        4,
-    )
+def weighted_rule(
+    parts: dict[str, float],
+    w_skill: float,
+    w_city: float,
+    w_exp: float,
+    w_role: float,
+    normalize: bool = False,
+) -> float:
+    """按权重把四分项原始分合成规则分（调参网格搜索复用，保证与线上公式一致）。
+
+    `normalize=True`（L2，仅 `WEIGHTS_AUTO_TUNE` 开时）：`parts` 里缺项时把缺项的
+    权重**按比例摊给其余项**（不再让常量 0.5 占着权重把所有人压进窄区间）。
+    必须与 L3 一起开——只归一分档不做，rule 会退化成 role 的线性函数，并列更多。
+    """
+    weights = {"skill": w_skill, "city": w_city, "exp": w_exp, "role": w_role}
+    if normalize:
+        kept = {k: w for k, w in weights.items() if k in parts}
+        total = sum(kept.values())
+        if total <= 0:
+            return 0.0
+        weights = {k: w / total for k, w in kept.items()}
+    return round(sum(w * parts[k] for k, w in weights.items()), 4)
 
 
 def compute_match(
@@ -232,8 +444,11 @@ def compute_match(
 
     w = weights or WeightSet.from_settings()
     explain: list[dict] = []
-    parts = match_parts(profile, job, explain)
-    rule = weighted_rule(parts, w.skill, w.city, w.exp, w.role)
+    # L1+L2 权重归一：挂在 `WEIGHTS_AUTO_TUNE` 后面（默认关）。关 = 与旧口径逐位一致；
+    # 开 = 不可判定项不再塞 0.5，权重按比例摊给其余项（口径变更，需全量重算 match_scores）。
+    adaptive = settings.weights_auto_tune
+    parts = match_parts(profile, job, explain, drop_unknown=adaptive)
+    rule = weighted_rule(parts, w.skill, w.city, w.exp, w.role, normalize=adaptive)
     if vec_score is None:
         return {"score": rule, "rule": rule, "explain": explain}
 

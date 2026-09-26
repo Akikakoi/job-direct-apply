@@ -332,6 +332,38 @@ def test_upload_requires_input(session, client):
     assert resp.status_code == 400
 
 
+def test_upload_blocking_work_leaves_event_loop(session, client, monkeypatch):
+    """回归：上传里的阻塞活（抽文本/落盘/LLM 解析）必须离开事件循环线程。
+
+    此前该端点是 `async def` 里直跑同步解析（LLM 单次 20~35s），整个事件循环被冻住，
+    期间连 /health 都没人应答、代理与浏览器的 keep-alive 连接空转被 RST，恢复后清理
+    这些连接就刷出 `ConnectionResetError: WinError 10054`。断言"工作线程 ≠ 调用线程"
+    即可钉住这个契约，不需要真起服务或真调 LLM。
+    """
+    import threading
+
+    from app import main as main_mod
+    from starlette.concurrency import run_in_threadpool as real_pool
+
+    seen: dict = {}
+
+    async def spy(func, *args, **kwargs):
+        seen["caller"] = threading.get_ident()  # async 端点所在线程 = 事件循环线程
+
+        def wrapped(*a, **kw):
+            seen["worker"] = threading.get_ident()
+            return func(*a, **kw)
+
+        return await real_pool(wrapped, *args, **kwargs)
+
+    monkeypatch.setattr(main_mod, "run_in_threadpool", spy)
+    resp = client.post("/api/resumes", data={"raw_text": RESUME_ZH})
+    assert resp.status_code == 200
+    assert resp.json()["data"]["profile"]["experience_years"] == 8
+    assert seen, "上传端点未走线程池（run_in_threadpool 没被调用）"
+    assert seen["worker"] != seen["caller"]
+
+
 # ---------- active 标记 / 删除 / 列表（P4 挂账销项） ----------
 
 

@@ -71,7 +71,11 @@ class Settings(BaseSettings):
 
     # §12.5 反馈回灌闭环：权重自动采纳（默认关——自动改线上排序不能默认开）
     # 生效权重 = match_weight_versions 最新一行；本组参数只控制"自动采纳"的门槛与节奏
-    weights_auto_tune: bool = False          # 开=beat 按周评估并采纳优于基线的权重
+    # 第二十五轮起，本开关**同时**是一组打分口径（L1+L2 权重归一）的总闸：开 =
+    # match_parts 剔除"不可判定"项（无技能标签/城市未知/跨区）+ weighted_rule 按比例
+    # 摊权重；关 = 与旧口径逐位一致。两者绑在一起是因为它们必须同时变更——只归一
+    # 不分档会让 rule 退化成 role 的线性函数、并列更多。开之前需全量重算 match_scores。
+    weights_auto_tune: bool = False          # 开=beat 按周评估并采纳优于基线的权重 + 启用权重归一打分
     weights_auto_tune_margin: float = 0.02   # NDCG 提升门槛（低于此视为噪声，不换参数）
     weights_auto_tune_min_sample: int = 10   # 参与自动采纳所需的最小有反馈简历数
     weights_auto_tune_step: float = 0.1      # 网格粒度（与 /api/insights/tuning 同义）
@@ -85,6 +89,10 @@ class Settings(BaseSettings):
     embeddings_dim: int = 1024                   # 与模型产出维度一致（读写门禁）
     embeddings_device: str = "cpu"               # 无 GPU 机器默认 cpu
     embeddings_batch_size: int = 32
+    # 截断长度：0 = 用模型自带默认。嵌入式文本是「标题+技能+正文」，而轻量多语模型
+    # （paraphrase-multilingual-MiniLM）自带默认仅 128——标题+技能就吃满，JD 正文
+    # 全被切掉，vec 分会退化成规则分的重复。按需调大（越大越慢，成本随真实长度走）。
+    embeddings_max_seq_len: int = 512
 
     # P3 投递催进：pending 状态卡超过 T 个自然日进入提醒（§8，T 天默认值挂账销项）
     reminder_after_days: int = 3

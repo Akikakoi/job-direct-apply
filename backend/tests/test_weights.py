@@ -280,19 +280,31 @@ def test_api_weight_admin_gate(client, session, monkeypatch):
 
 
 def test_beat_auto_tune_entry_gated_by_settings(monkeypatch):
+    """beat 条目随 WEIGHTS_AUTO_TUNE 注册/注销（任务本身恒可被调用）。
+
+    必须显式 monkeypatch 再 reload：本用例**不依赖开发者本机 `.env`**——生产 `.env`
+    可能已打开该开关（第二十六轮起），读本机配置会让断言随机器而变。
+    """
     from app.workers import celery_app as mod
 
-    # 默认关：条目不注册，但任务本身必须可被调用（运维可手动 .run() 评估）
-    assert "weights-auto-tune-weekly" not in mod.celery_app.conf.beat_schedule
+    original = settings.weights_auto_tune
 
-    monkeypatch.setattr(settings, "weights_auto_tune", True)
-    reloaded = importlib.reload(mod)
+    def _reload_with(flag: bool):
+        monkeypatch.setattr(settings, "weights_auto_tune", flag)
+        return importlib.reload(mod)
+
     try:
+        off = _reload_with(False)
+        assert "weights-auto-tune-weekly" not in off.celery_app.conf.beat_schedule
+
+        reloaded = _reload_with(True)
         assert reloaded.celery_app.conf.beat_schedule["weights-auto-tune-weekly"]["task"] == (
             "app.workers.celery_app.auto_tune_weights_task"
         )
     finally:
-        importlib.reload(mod)  # 还原（下次导入按默认配置）
+        # 按"本机当前配置"还原注册状态，避免把临时开关泄漏给后续用例
+        settings.weights_auto_tune = original
+        importlib.reload(mod)
 
 
 def test_auto_tune_task_skips_when_disabled(session, monkeypatch):

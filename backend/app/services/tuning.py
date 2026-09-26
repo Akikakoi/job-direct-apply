@@ -27,6 +27,7 @@ from itertools import product
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models import Application, Job, Resume
 from app.pipelines.match import match_parts, weighted_rule
 from app.services.insights import GRADED_RELEVANCE, latest_outcomes, ndcg, weights_snapshot
@@ -85,7 +86,7 @@ def collect_samples(session: Session) -> dict:
         profile = resume.profile or {}
         vec_map, _ = build_vec_map(session, profile, resume.raw_text, jobs, tfidf=tfidf)
         rows = [
-            (job.id, match_parts(profile, job), vec_map.get(job.id) if vec_map else None)
+            (job.id, match_parts(profile, job, drop_unknown=settings.weights_auto_tune), vec_map.get(job.id) if vec_map else None)
             for job in jobs
         ]
         samples.append({"resume_id": rid, "relevance": relevance[rid], "rows": rows})
@@ -111,7 +112,12 @@ def ndcg_at_k(samples: list[dict], weights: dict[str, float], alpha: float, k: i
 def _final(row: tuple, weights: dict[str, float], alpha: float, beta: float) -> float:
     job_id, parts, vec = row
     rule = weighted_rule(
-        parts, weights["skill"], weights["city"], weights["exp"], weights["role"]
+        parts,
+        weights["skill"],
+        weights["city"],
+        weights["exp"],
+        weights["role"],
+        normalize=settings.weights_auto_tune,
     )
     return rule if vec is None else round(alpha * rule + beta * vec, 4)
 

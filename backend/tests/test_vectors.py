@@ -28,9 +28,15 @@ PG_URL = os.environ.get("JDA_TEST_PG_URL")
 
 
 @pytest.fixture(autouse=True)
-def _no_llm_key(monkeypatch):
-    """与 test_resume_parse / test_auth 同约定：本机 .env 有真 LLM key，必须封掉。"""
+def _hermetic_env(monkeypatch):
+    """与 test_resume_parse / test_auth 同约定：本机 .env 有真 LLM key，必须封掉。
+
+    `embeddings_provider` 同理——生产 `.env` 已置 `sentence_transformers`（向量模式
+    开启），单测不该依赖开发者本机配置：一律封回 none（TF-IDF 老路），向量路径由
+    各用例显式 monkeypatch 打开。
+    """
     monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "embeddings_provider", "none")
 
 
 def _make_user(session, email: str) -> User:
@@ -119,6 +125,62 @@ def test_provider_embed_dimension_gate():
     provider._model = _WrongDimModel()
     with pytest.raises(ValueError, match="维度不符"):
         provider.embed(["算法工程师"])
+
+
+def test_embed_length_aware_batching_keeps_input_order():
+    """长度感知分批：同批尽量等长（长 JD 不再把整批 padding 到同长度），返回按入参顺序。
+
+    用 echo 模型（返回 [文本长度, 0]）验两件事：批内是长度相邻的样本；输出下标与入参一致。
+    """
+    provider = SentenceTransformerProvider("m", "cpu", dimension=2, batch_size=2)
+    seen: list[list[str]] = []
+
+    class _EchoModel:
+        def encode(self, texts, **kwargs):
+            seen.append(list(texts))
+            return [[float(len(t)), 0.0] for t in texts]
+
+    provider._model = _EchoModel()
+    texts = ["a" * 10, "b", "c" * 8, "d" * 2]
+    vecs = provider.embed(texts)
+    assert [v[0] for v in vecs] == [10.0, 1.0, 8.0, 2.0]  # 顺序还原（不是排序后的顺序）
+    assert seen[0] == ["b", "d" * 2]  # 最短两条同批
+    assert seen[1] == ["c" * 8, "a" * 10]  # 较长的两条同批
+
+
+def test_provider_applies_configured_max_seq_length(monkeypatch):
+    """模型自带截断长度必须被配置覆盖。
+
+    轻量多语 MiniLM 默认 128——「标题+技能+正文」里标题和技能就吃满，JD 正文全被切掉，
+    vec 分会退化成规则分的重复。max_seq_length=0 时保持模型默认（换模型不硬套）。
+    """
+    import sys
+    import types
+
+    holder: dict = {}
+
+    class _Model:
+        max_seq_length = 128
+
+        def encode(self, texts, **kwargs):
+            return [[0.0, 1.0] for _ in texts]
+
+    def _FakeSentenceTransformer(name, device=None):
+        holder["model"] = _Model()
+        return holder["model"]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=_FakeSentenceTransformer),
+    )
+    assert SentenceTransformerProvider(
+        "m", "cpu", dimension=2, max_seq_length=256
+    ).embed(["后端开发"]) == [[0.0, 1.0]]
+    assert holder["model"].max_seq_length == 256  # 覆盖生效
+
+    assert SentenceTransformerProvider("m", "cpu", dimension=2).embed(["后端开发"])
+    assert holder["model"].max_seq_length == 128  # 0/未配 → 保留模型默认
 
 
 # ---------- 向量协议与门禁 ----------

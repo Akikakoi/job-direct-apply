@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, 
 from pydantic import BaseModel
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.db import SessionLocal
@@ -362,29 +364,52 @@ async def upload_resume(
     user: dict | None = Depends(current_user),
     session: Session = Depends(get_session),
 ) -> dict:
-    """上传简历（txt/md/pdf 或直接贴文本），解析入库并返回 profile。"""
+    """上传简历（txt/md/pdf 或直接贴文本），解析入库并返回 profile。
+
+    这里只有"读请求体"是 async 的；文本抽取、密文落盘、LLM 解析全是阻塞调用，直接
+    写在本函数里会把事件循环冻住几十秒（LLM 单次 20~35s 很常见），期间连 /health
+    都没人应答，浏览器/代理的 keep-alive 连接空转被 RST，事件循环恢复后清理这些
+    连接就会刷出 `ConnectionResetError: WinError 10054`（Windows Proactor 噪音）。
+    所以读完 body 就把余下流程整段交给线程池，循环始终可服务其他请求。
+    """
     user_id = _scope_user_id(user_id, user)
+    file_bytes: bytes | None = None
+    filename = "resume.txt"
+    if file is not None:
+        file_bytes = await file.read()
+        filename = file.filename or filename
+    elif not raw_text:
+        raise HTTPException(status_code=400, detail="需要 file 或 raw_text 之一")
+    return await run_in_threadpool(
+        _ingest_resume, session, user_id, file_bytes, filename, raw_text
+    )
+
+
+def _ingest_resume(
+    session: Session,
+    user_id: int,
+    file_bytes: bytes | None,
+    filename: str,
+    raw_text: str | None,
+) -> dict:
+    """上传后的同步主体（在线程池里跑）：抽文本 → 落盘 → 解析 → 入库。"""
     saved_path: str | None = None
     file_encrypted = False
-    try:
-        if file is not None:
-            data = await file.read()
-            filename = file.filename or "resume.txt"
-            text = extract_text(filename, data)
-            # 原件存盘，便于追溯/重解析；配了 UPLOADS_KEY 则密文落盘（§10 静态加密）
-            uploads = Path(settings.uploads_dir)
-            uploads.mkdir(parents=True, exist_ok=True)
-            suffix = "." + filename.rsplit(".", 1)[-1].lower()
-            dest = uploads / f"resume_{user_id}_{int(datetime.now().timestamp())}{suffix}"
-            file_encrypted = crypto.enabled()
-            dest.write_bytes(crypto.encrypt_bytes(data) if file_encrypted else data)
-            saved_path = str(dest)
-        elif raw_text:
-            text = raw_text
-        else:
-            raise HTTPException(status_code=400, detail="需要 file 或 raw_text 之一")
-    except UnsupportedFile as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if file_bytes is not None:
+        try:
+            text = extract_text(filename, file_bytes)
+        except UnsupportedFile as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 原件存盘，便于追溯/重解析；配了 UPLOADS_KEY 则密文落盘（§10 静态加密）
+        uploads = Path(settings.uploads_dir)
+        uploads.mkdir(parents=True, exist_ok=True)
+        suffix = "." + filename.rsplit(".", 1)[-1].lower()
+        dest = uploads / f"resume_{user_id}_{int(datetime.now().timestamp())}{suffix}"
+        file_encrypted = crypto.enabled()
+        dest.write_bytes(crypto.encrypt_bytes(file_bytes) if file_encrypted else file_bytes)
+        saved_path = str(dest)
+    else:
+        text = raw_text or ""
 
     # §9 resume_parse_task：开了异步开关时先入库占位（parse_status=pending），
     # 投递成功即返回，解析交给 worker；投递失败（无 Redis/worker）降级为请求内同步。
@@ -627,6 +652,117 @@ def _mix_regions(cn_rows: list, overseas_rows: list) -> list:
     return merged
 
 
+def _round_robin(groups: list[list]) -> list:
+    """多路严格轮转合并：逐轮每路各取一条，取空的路自动退出轮转。
+
+    各路内部必须已按分数有序。`_mix_regions` 是它 N=2 的特例（那里还多一层
+    "首位给分数更高的一路"的处理，这里靠调用方传参顺序表达）。
+    """
+    merged: list = []
+    depth = 0
+    while True:
+        taken = False
+        for group in groups:
+            if depth < len(group):
+                merged.append(group[depth])
+                taken = True
+        if not taken:
+            return merged
+        depth += 1
+
+
+def _tokens(text: str) -> set[str]:
+    """小写词元（只留数字/字母/CJK），供 role 与 title 的词面重合计分。"""
+    return {t for t in re.split(r"[^0-9a-z\u4e00-\u9fff]+", (text or "").lower()) if t}
+
+
+def _role_title_overlap(title_l: str, title_tokens: set[str], role_tokens: set[str]) -> int:
+    """target_role 与职位 title 的词面重合数（L4 的第三档并列键）。
+
+    ASCII 词按整词比；CJK 词按前两字比——"后端工程师" 与 "后端开发工程师" 整词
+    不同但同指一个职能，取前两字才比得动。
+    """
+    n = 0
+    for t in role_tokens:
+        if t.isascii():
+            n += 1 if t in title_tokens else 0
+        else:
+            n += 1 if t[:2] in title_l else 0
+    return n
+
+
+def _tie_break_key(row, role_tokens: set[str]) -> tuple:
+    """并列打破键（L4，第二十五轮）。
+
+    SQL 侧 order_by 只有 final_score → rule_score → updated_at，而前两级分数在海外
+    场景大面积并列（实测前 10 名门槛上并列近百条），实际决定出场的退化成"谁先入库"
+    （updated_at）。这里在分数之后补三档**分项真信号**：role 原始分 → skill 交集命中
+    数 → title 与 target_role 的词面重合数；最后才轮到时间与 id 兜底。
+    只改排序、不改任何分数，存量 match_scores 无需重算。键内全部取负 = 单次升序排序
+    即得"分数高、信号强、时间新、id 小"序（datetime 不能取负，故换算成时间戳）。
+    """
+    ms, job = row
+    expl = {e.get("key"): e for e in (ms.explain or []) if isinstance(e, dict)}
+    role = float((expl.get("role") or {}).get("score") or 0.0)
+    skill_hits = len((expl.get("skill") or {}).get("hit") or [])
+    title_l = (job.title or "").lower()
+    overlap = _role_title_overlap(title_l, _tokens(title_l), role_tokens)
+    ts = job.updated_at.timestamp() if job.updated_at else 0.0
+    return (
+        -float(ms.final_score or 0.0),
+        -float(ms.rule_score or 0.0),
+        -role,
+        -skill_hits,
+        -overlap,
+        -ts,
+        job.id,
+    )
+
+
+def _route_rows(session: Session, where_clauses: list, fetch_n: int, target_role: str = "") -> list:
+    """一路（国内/海外）的候选序列：先做公司级轮转，保证每家都有稳定曝光位。
+
+    方案 A（`_mix_regions`）只解决了"国内 vs 海外"，没管"海外内部是谁"：这一路
+    内部纯按 final_score 排时，高分公司会把窗口吃光——实测海外前 50 名 100% 来自
+    ashby 上的 3 家公司（elevenlabs / linear / ashby），而 stripe(647)、
+    equinox(736)、nvidia(40) 一条都进不来。故在路内再叠一层公司级轮转：公司顺序
+    按"该公司在本简历下的最高分"降序（高分先出），公司内部仍按分数降序，逐轮各取
+    一条。公司数是冷启动资产、个位数（当前库内 11 家），逐家取数的开销可忽略。
+
+    第二十五轮补 L4：公司内、公司之间都补了并列打破键（`_tie_break_key`）——分数
+    并列时按 role/skill/词面重合排序，最后才是 updated_at 与 id。
+    """
+    order = (MatchScore.final_score.desc(), MatchScore.rule_score.desc(), Job.updated_at.desc())
+    best = func.max(MatchScore.final_score)
+    best_rule = func.max(MatchScore.rule_score)
+    company_ids = [
+        row[0]
+        for row in session.execute(
+            select(Job.company_id)
+            .select_from(MatchScore)
+            .join(Job, MatchScore.job_id == Job.id)
+            .where(*where_clauses)
+            .group_by(Job.company_id)
+            .order_by(best.desc(), best_rule.desc(), Job.company_id.asc())
+        ).all()
+    ]
+    groups = [
+        session.execute(
+            select(MatchScore, Job)
+            .join(Job, MatchScore.job_id == Job.id)
+            .where(
+                *where_clauses,
+                Job.company_id.is_(None) if company_id is None else Job.company_id == company_id,
+            )
+            .order_by(*order)
+            .limit(fetch_n)
+        ).all()
+        for company_id in company_ids
+    ]
+    role_tokens = _tokens(target_role)
+    return _round_robin([sorted(g, key=lambda row: _tie_break_key(row, role_tokens)) for g in groups])
+
+
 @app.get("/api/recommend")
 def recommend(
     resume_id: int,
@@ -658,12 +794,6 @@ def recommend(
         # source 为 NULL 的脏数据归入海外，规避 NOT IN 遇 NULL 全部落空
         where_clauses.append(or_(Job.source.is_(None), Job.source.notin_(DOMESTIC_SOURCES)))
 
-    stmt = (
-        select(MatchScore, Job)
-        .join(Job, MatchScore.job_id == Job.id)
-        .where(*where_clauses)
-        .order_by(MatchScore.final_score.desc(), MatchScore.rule_score.desc(), Job.updated_at.desc())
-    )
     total = session.execute(
         select(func.count())
         .select_from(MatchScore)
@@ -671,18 +801,23 @@ def recommend(
         .where(*where_clauses)
     ).scalar_one()
     window = min(limit, 200)
+    fetch_n = offset + window
+    target_role = str((resume.profile or {}).get("target_role") or "")
     if region == "all":
-        # 方案 A：两路各取前 offset+window 条后交错，等价于全局交错排序的该窗口
-        fetch_n = offset + window
-        cn_rows = session.execute(
-            stmt.where(Job.source.in_(DOMESTIC_SOURCES)).limit(fetch_n)
-        ).all()
-        overseas_rows = session.execute(
-            stmt.where(or_(Job.source.is_(None), Job.source.notin_(DOMESTIC_SOURCES))).limit(fetch_n)
-        ).all()
+        # 方案 A：两路各自做「公司级轮转」后再 1:1 交错，等价于全局交错排序的该窗口
+        cn_rows = _route_rows(
+            session, [*where_clauses, Job.source.in_(DOMESTIC_SOURCES)], fetch_n, target_role
+        )
+        overseas_rows = _route_rows(
+            session,
+            [*where_clauses, or_(Job.source.is_(None), Job.source.notin_(DOMESTIC_SOURCES))],
+            fetch_n,
+            target_role,
+        )
         rows = _mix_regions(cn_rows, overseas_rows)[offset : offset + window]
     else:
-        rows = session.execute(stmt.limit(window).offset(offset)).all()
+        # 单区：where_clauses 已含 region 条件，路内做公司级轮转后切窗口
+        rows = _route_rows(session, where_clauses, fetch_n, target_role)[offset : offset + window]
     return {
         "code": 0,
         "data": {

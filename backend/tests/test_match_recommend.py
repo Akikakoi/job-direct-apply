@@ -111,6 +111,111 @@ def test_role_fit_bilingual(session):
     assert compute_match(en_profile, en_dev)["explain"][3]["score"] == 1.0
 
 
+def test_role_fit_family_tiers(session):
+    """L3 分档（第二十五轮）：精确未命中不再一律 0，按职能族给梯度。
+
+    动机：海外场景 role 是唯一真信号，二值化后前 10 名门槛上并列近百条，实际决定
+    出场的退化成 updated_at。
+    """
+
+    def _role(title: str) -> dict:
+        job = _add_job(session, title, "San Francisco, CA", ["python"])
+        return next(e for e in compute_match(PROFILE, job)["explain"] if e["key"] == "role")
+
+    # 同族其他具体职能：后端简历看到 前端/测试 → 0.85
+    assert _role("Frontend Engineer")["score"] == 0.85
+    assert _role("QA Engineer")["tier"] == "family_peer"
+    # 本族泛称：software / infrastructure 不特指某职能 → 0.6
+    assert _role("Software Engineer, Platform")["score"] == 0.6
+    assert _role("Infrastructure Engineer")["tier"] == "family_generic"
+    # 相邻族（工程 ↔ 数据）→ 0.4
+    assert _role("Data Scientist")["score"] == 0.4
+    # 未识别：title 里没有任何已知职能词 → 不算"不相关"，给 0.2 而不是 0
+    assert _role("Member of Technical Staff")["score"] == 0.2
+    # 明确非目标：他族职能词 / 明确无关岗词表 → 0
+    assert _role("Technical Recruiter")["score"] == 0.0
+    assert _role("Personal Trainer")["score"] == 0.0
+
+
+def test_role_fit_generic_word_does_not_promote_off_target(session):
+    """"Software Sales" 不能因为 "software" 被当成工程岗（他族判定先于泛称档）。"""
+    job = _add_job(session, "Software Sales Representative", "San Francisco, CA", ["python"])
+    role = next(e for e in compute_match(PROFILE, job)["explain"] if e["key"] == "role")
+    assert role["score"] == 0.0 and role["tier"] == "off_target"
+
+
+def test_weight_normalization_gated_behind_flag(session, monkeypatch):
+    """L1+L2 权重归一挂在 WEIGHTS_AUTO_TUNE 后面：关 = 旧口径逐位一致，开 = 权重摊给其余项。"""
+    from app.core.config import settings
+    from app.pipelines.match import match_parts
+
+    # 职位无技能标签 → skill 不可判定；title 明确非目标 → role 0
+    job = _add_job(session, "Technical Recruiter", "杭州市", [])
+
+    monkeypatch.setattr(settings, "weights_auto_tune", False)
+    off = compute_match(PROFILE, job)
+    skill = next(e for e in off["explain"] if e["key"] == "skill")
+    assert skill["score"] == 0.5  # 旧行为：中性占位
+    assert off["rule"] == pytest.approx(0.5 * 0.5 + 0.2 * 1 + 0.15 * 1 + 0.15 * 0)
+
+    monkeypatch.setattr(settings, "weights_auto_tune", True)
+    assert "skill" not in match_parts(PROFILE, job, drop_unknown=True)
+    on = compute_match(PROFILE, job)
+    # 剔除 skill 后，剩下的 city 0.2 + exp 0.15 + role 0.15 = 0.5 归一化摊满
+    assert on["rule"] == pytest.approx((0.2 * 1 + 0.15 * 1 + 0.15 * 0) / 0.5)
+
+
+def test_weight_normalization_overseas_drops_skill_and_city(session, monkeypatch):
+    """L1+L2 海外线上口径（第二十六轮开启）：skill 无标签 + city 跨区不可比 → 两项同时
+    被剔除，权重按比例摊给 exp/role（0.15:0.15 → 各 50%）；关 = 旧口径两项各塞 0.5。
+
+    "两项同时剔除"正是本轮 A/B 实测里最需要盯住的口径：归一后 rule 不再含有
+    "有没有技能标签 / 城市在不在同一区"这类与匹配度无关的常量偏置。
+    """
+    from app.core.config import settings
+
+    # PROFILE.cities 全为国内城市 → 海外职位的 city 属"跨区不可比"；职位无技能标签
+    job = _add_job(session, "Backend Engineer", "San Francisco, CA", [])
+
+    monkeypatch.setattr(settings, "weights_auto_tune", False)
+    off = compute_match(PROFILE, job)
+    assert off["rule"] == pytest.approx(0.5 * 0.5 + 0.2 * 0.5 + 0.15 * 1 + 0.15 * 1)
+
+    monkeypatch.setattr(settings, "weights_auto_tune", True)
+    from app.pipelines.match import match_parts
+
+    parts = match_parts(PROFILE, job, drop_unknown=True)
+    assert set(parts) == {"exp", "role"}  # skill / city 双双剔除
+    on = compute_match(PROFILE, job)
+    # (0.15*1 + 0.15*1) / 0.30：exp 不限 → 1、role 精确命中 → 1
+    assert on["rule"] == pytest.approx(0.5 * 1 + 0.5 * 1)
+
+
+def test_tie_break_key_sub_score_priority():
+    """L4：final/rule 并列时按 role 原始分 → skill 命中数 → 时间 → id 排序。
+
+    分数落库是 Numeric(5,2)（两位小数），大面积并列是常态，故并列键不是可选装饰。
+    """
+    from datetime import datetime, timezone
+
+    from app.main import _tie_break_key
+    from app.models import Job, MatchScore
+
+    def row(role: float, hits: int, ts: int, jid: int):
+        job = Job(id=jid, title="Backend Engineer", updated_at=datetime.fromtimestamp(ts, tz=timezone.utc))
+        ms = MatchScore(
+            final_score=0.75,
+            rule_score=0.6,
+            explain=[{"key": "role", "score": role}, {"key": "skill", "hit": ["x"] * hits}],
+        )
+        return (ms, job)
+
+    newer_irrelevant = row(0.0, 0, 2_000_000_000, 1)  # 时间更新，但分项信号弱
+    older_relevant = row(1.0, 2, 1_000_000_000, 2)    # 时间更旧，但分项信号强
+    key = lambda r: _tie_break_key(r, set())  # noqa: E731
+    assert sorted([newer_irrelevant, older_relevant], key=key) == [older_relevant, newer_irrelevant]
+
+
 def test_exp_fit_ladder(session):
     ok = _add_job(session, "a", "杭州市", ["python"], exp_min=5)
     assert compute_match(PROFILE, ok)["explain"][2]["score"] == 1.0
@@ -215,7 +320,8 @@ def test_profile_update_triggers_rematch(session, client):
 
     resp = client.get("/api/recommend", params={"resume_id": resume.id})
     role = next(e for e in resp.json()["data"]["items"][0]["explain"] if e["key"] == "role")
-    assert role["score"] == 0.0  # 新 target_role 与后端职位不再命中
+    # L3 分档（第二十五轮）：前端/后端同属工程族，不再一刀切 0，而是"同族其他职能"档
+    assert role["score"] == 0.85 and role["tier"] == "family_peer"
 
 
 def test_recommend_404(session, client):

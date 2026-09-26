@@ -433,7 +433,9 @@ export default function Home() {
         <div className="card">
           <h2>
             推荐职位（共 {total} 个，
-            {region === "all" ? "国内/国外交错展示，各路内按匹配度排序" : "按匹配度排序"}）
+            {region === "all"
+              ? "国内/国外交错展示，各路内按公司轮流曝光"
+              : "各公司轮流曝光，公司内按匹配度排序"}）
           </h2>
           <div className="row" style={{ marginBottom: 4 }}>
             <span className="meta">地区筛选</span>
