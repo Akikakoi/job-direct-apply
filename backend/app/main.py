@@ -617,7 +617,9 @@ def update_resume_profile(
 # ashby/workday/smartrecruiters）均为海外公司。实测库内该信号与城市信号完全一致
 # （netease 2629 条全为中文城市，ATS 源 1918 条全为非中文城市），且比 city 正则
 # 判定更可移植（不依赖 PG 专有正则，SQLite 同样可用）。新增国内源时在此登记。
-DOMESTIC_SOURCES = ("netease",)
+# demo（第二十九轮）：scripts/seed_nursing_jobs.py 种的国内测试岗位（护理等），
+# 只为本机测试提供"有岗可推"的池子，采集器永远不会产出该 source。
+DOMESTIC_SOURCES = ("netease", "demo")
 
 
 def _mix_regions(cn_rows: list, overseas_rows: list) -> list:

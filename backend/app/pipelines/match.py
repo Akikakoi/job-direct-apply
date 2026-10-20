@@ -74,6 +74,11 @@ _ROLE_SYNONYMS: dict[str, list[str]] = {
     "软件": ["software"],
     "平台": ["platform"],
     "基础设施": ["infrastructure", "infra"],
+    # 第二十九轮补齐：医疗护理族——"临床护士"这类 target_role 此前不在词表内，
+    # role 恒走 unknown_target_role 0 分，全池滑向底噪分（实测人人 24~25 并列）。
+    "护士": ["nurse", "nursing"],
+    "医师": ["physician", "doctor", "dentist", "surgeon"],
+    "药师": ["pharmacist", "pharmacy"],
 }
 
 # ---------- L3 职能族（第二十五轮）：把 role 分从 0/1 二值展开成梯度 ----------
@@ -100,6 +105,7 @@ _ROLE_FAMILY_MEMBERS: dict[str, list[str]] = {
     "data": ["数据", "算法"],
     "product": ["产品", "设计", "运营"],
     "business": ["销售", "财务", "人力"],
+    "medical": ["护士", "医师", "药师"],
 }
 
 # 本族泛称：不特指某个职能、但明确属于该族的词。单独一档是因为
@@ -109,6 +115,7 @@ _ROLE_FAMILY_GENERIC: dict[str, list[str]] = {
     "data": ["machine learning", "analytics", "artificial intelligence"],
     "product": ["growth"],
     "business": ["account manager", "accountant", "payroll", "accounts payable", "recruiter", "talent"],
+    "medical": ["medical", "healthcare", "health care", "clinical", "clinic", "health"],
 }
 
 # 相邻族：技能栈相邻的常见换岗路径（工程 ↔ 数据、产品 ↔ 运营）；其余跨族按
@@ -140,6 +147,8 @@ _ROLE_OFF_WORDS = (
     "desk", "receptionist", "concierge", "doorman", "bellman", "bartender",
     "dishwasher", "laundry", "maintenance", "cleaner", "nanny", "kids",
     # 其他明确无关专业
+    # "nurse" 保留在此（第二十九轮）：医疗族简历看 "Nurse" 岗会先命中 family_peer
+    # （off 判定在其后），不受影响；其余族简历看护士岗仍明确无关 → 0。
     "nurse", "driver", "cook", "chef", "culinary", "sommelier",
 )
 
