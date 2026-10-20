@@ -56,7 +56,7 @@ def test_tasks_registered():
 
 
 def test_broker_defaults_to_local_redis():
-    # 未配置 REDIS_URL 时回退 localhost:6379（与 docker-compose 一致）
+    # 未配置 REDIS_URL 时回退 localhost:6379（本机常见 Redis 端口；留空仍不启用定时任务）
     from app.workers import celery_app as mod
 
     assert mod.BROKER_URL == "redis://localhost:6379/0"

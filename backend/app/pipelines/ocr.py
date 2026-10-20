@@ -57,6 +57,7 @@ def _client() -> httpx.Client:
         base_url=settings.ocr_base_url,
         headers={"Authorization": f"Bearer {settings.ocr_api_key}"},
         timeout=120,
+        trust_env=settings.ocr_trust_env,
     )
 
 

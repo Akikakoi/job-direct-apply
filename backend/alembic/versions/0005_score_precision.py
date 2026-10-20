@@ -31,23 +31,25 @@ SCORE_COLUMNS = ("rule_score", "vec_score", "llm_score", "final_score")
 
 
 def upgrade() -> None:
+    # batch 模式：SQLite 不支持裸 ALTER COLUMN，走"建新表-拷数据-改名"；
+    # PG 上 batch 退化为普通 alter，行为不变。
     for col in SCORE_COLUMNS:
-        op.alter_column(
-            "match_scores",
-            col,
-            existing_type=sa.Numeric(5, 2),
-            type_=sa.Numeric(6, 4),
-            existing_nullable=True,
-        )
+        with op.batch_alter_table("match_scores") as batch:
+            batch.alter_column(
+                col,
+                existing_type=sa.Numeric(5, 2),
+                type_=sa.Numeric(6, 4),
+                existing_nullable=True,
+            )
 
 
 def downgrade() -> None:
     # 回退会按 0.01 舍入存量值（不可逆丢精度），回退后同样需要全量重算。
     for col in SCORE_COLUMNS:
-        op.alter_column(
-            "match_scores",
-            col,
-            existing_type=sa.Numeric(6, 4),
-            type_=sa.Numeric(5, 2),
-            existing_nullable=True,
-        )
+        with op.batch_alter_table("match_scores") as batch:
+            batch.alter_column(
+                col,
+                existing_type=sa.Numeric(6, 4),
+                type_=sa.Numeric(5, 2),
+                existing_nullable=True,
+            )

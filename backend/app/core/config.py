@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """全局配置：环境变量 / .env 覆盖默认值。"""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # JDA_ENV_FILE lets deployment/testing select an explicit env file; normal runs keep .env.
+    model_config = SettingsConfigDict(
+        env_file=os.getenv("JDA_ENV_FILE", ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # SQLite 开箱即用；生产切 PostgreSQL（需另装 psycopg2-binary）
     database_url: str = "sqlite:///./dev.db"
+    # local = 本机部署（localhost 合理）；hosted = 云/托管部署（审计 localhost）
+    deployment_profile: str = "local"
     # 空 = 不启用 Redis（限流退化为 DB 间隔守卫，别名缓存退化为直查 DB）
     redis_url: str = ""
 
@@ -53,6 +62,8 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com"
     llm_model: str = "deepseek-chat"
     llm_timeout_s: int = 60
+    # false = 忽略系统 HTTP(S)_PROXY 直连（本机代理失效时仍可调用模型）
+    llm_trust_env: bool = False
     uploads_dir: str = "./uploads"          # 简历原件存盘目录
     # §10 简历原件静态加密（AES-GCM，应用层密钥；见 app/services/crypto.py）
     # 空 = 不加密（旧行为，prodcheck 会 warn「原件明文落盘」）；生成：
@@ -122,6 +133,8 @@ class Settings(BaseSettings):
     ocr_api_key: str = ""
     ocr_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     ocr_model: str = "qwen-vl-plus"
+    # false = 忽略系统 HTTP(S)_PROXY 直连（OCR 厂商通常可直连）
+    ocr_trust_env: bool = False
     ocr_max_pages: int = 5                  # 最多渲染页数（成本控制）
 
     # P4 IM webhook（钉钉/企微群机器人）：type 空 = 不推 IM（与邮件互相独立）

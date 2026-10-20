@@ -43,6 +43,7 @@ def _build_client() -> httpx.Client:
         base_url=settings.llm_base_url,
         headers={"Authorization": f"Bearer {settings.llm_api_key}"},
         timeout=settings.llm_timeout_s,
+        trust_env=settings.llm_trust_env,
     )
 
 

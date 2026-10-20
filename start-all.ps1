@@ -1,22 +1,27 @@
-﻿# 简历直达 · 一键启动三服务（PG/Redis 容器 + 后端 uvicorn + 前端 Next.js）
+﻿# 简历直达 · 一键启动两服务（后端 uvicorn + 前端 Next.js）
 # 用法：
 #   .\start-all.ps1              # 常规启动（前端 dev 模式；后端/前端各开一个
 #                                #   日志窗口，实时滚动输出，同时落文件）
 #   .\start-all.ps1 -Prod        # 前端走 build + start
-#   .\start-all.ps1 -Stop        # 停止三服务（容器 stop，进程 kill）
+#   .\start-all.ps1 -UseProductionEnv -Hidden -NoPause
+#                                # 本机生产：读取 .env.production，自动迁移并启动全栈
+#   .\start-all.ps1 -Stop        # 停止两服务（进程 kill）
 #   .\start-all.ps1 -NoPause     # 自动化场景：跑完不停留（CI/会话内调用）
 #   .\start-all.ps1 -Hidden      # 不弹日志窗口，输出只落 logs/（自动化用）
 # 幂等：端口已在监听的组件自动跳过，可重复执行。
 # 双击运行请用 start-all.cmd（跑完窗口停住，能看到结果）。
+# 2026-10-19 去 Docker 化：SQLite 单文件（backend/dev.db）+ Redis 留空降级，
+# 不再依赖 Docker Desktop / PG / Redis 容器。
 
 param(
     [switch]$Prod,
+    [switch]$UseProductionEnv,
     [switch]$Stop,
     [switch]$NoPause,
     [switch]$Hidden   # 自动化场景：不弹服务窗口，日志只落文件（默认弹窗显示日志）
 )
 
-# 启动器不做全局 Stop：PS5.1 下原生命令（docker）往 stderr 写进度会被当作
+# 启动器不做全局 Stop：PS5.1 下原生命令往 stderr 写进度会被当作
 # terminating error 掐断脚本；可靠性靠本脚本自己的端口/health 检查保证。
 $ErrorActionPreference = "Continue"
 
@@ -25,34 +30,7 @@ $Backend   = Join-Path $Root "backend"
 $Frontend  = Join-Path $Root "frontend"
 $LogDir    = Join-Path $Root "logs"
 $PyExe     = Join-Path $Root ".venv\Scripts\python.exe"
-
-# Docker Desktop 主程序路径：机器级安装落在 Program Files，用户级安装会落到
-# LOCALAPPDATA\Programs\DockerDesktop（本机实测），故多候选探测 + 从 docker CLI
-# 位置反推，避免硬编码路径导致"未找到 Docker Desktop"而无法启动数据库。
-function Resolve-DockerDesktop {
-    $candidates = @()
-    if ($env:ProgramFiles) {
-        $candidates += (Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe")
-    }
-    if (${env:ProgramFiles(x86)}) {
-        $candidates += (Join-Path ${env:ProgramFiles(x86)} "Docker\Docker\Docker Desktop.exe")
-    }
-    if ($env:LOCALAPPDATA) {
-        $candidates += (Join-Path $env:LOCALAPPDATA "Programs\DockerDesktop\Docker Desktop.exe")
-    }
-    foreach ($p in $candidates) {
-        if (Test-Path $p) { return $p }
-    }
-    # 兜底：从 docker CLI 反推（<...>\DockerDesktop\resources\bin\docker.exe 上溯 3 级）
-    $cli = (Get-Command docker.exe -ErrorAction SilentlyContinue).Source
-    if ($cli) {
-        $root = Split-Path (Split-Path (Split-Path $cli -Parent) -Parent) -Parent
-        $exe = Join-Path $root "Docker Desktop.exe"
-        if (Test-Path $exe) { return $exe }
-    }
-    return $null
-}
-$DockerExe = Resolve-DockerDesktop
+$ProdEnv   = Join-Path $Backend ".env.production"
 
 function Test-Port([int]$Port) {
     $c = New-Object Net.Sockets.TcpClient
@@ -110,9 +88,21 @@ function Start-ServiceWindow([string]$Title, [string]$WorkDir, [string]$Command,
 }
 
 function Main {
+    if ($UseProductionEnv) {
+        if (-not (Test-Path $ProdEnv)) {
+            Write-Host "[FAIL] 未找到生产配置: $ProdEnv（先运行 scripts/bootstrap_production_env.py）"
+            return
+        }
+        $env:JDA_ENV_FILE = ".env.production"
+        $Prod = $true
+        Write-Host "[OK] 使用生产配置 backend/.env.production"
+    } else {
+        Remove-Item Env:JDA_ENV_FILE -ErrorAction SilentlyContinue
+    }
+
     if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
 
-    # ---------- Stop：停止三服务 ----------
+    # ---------- Stop：停止两服务 ----------
     if ($Stop) {
         Write-Host "== 停止服务 =="
         # 只停本项目端口（8001）；8000 可能是 stellar-mall 等其他项目的服务，不碰
@@ -124,58 +114,28 @@ function Main {
                     Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
                 }
         }
-        Push-Location $Backend
-        cmd /c "docker compose stop >nul 2>&1"
-        Pop-Location
-        Write-Host "[OK] 容器已停止（数据保留；再次运行本脚本或 docker compose start 可恢复）"
+        Write-Host "[OK] 服务已停止（SQLite 数据保留在 backend/dev.db）"
         Write-Host "[提示] 后端/前端日志窗口若仍开着（-NoExit 保留），直接关闭即可"
         return
     }
 
-    # ---------- 1. Docker 引擎 ----------
-    Write-Host "== 1/3 Docker 引擎 =="
-    $dockerOk = $false
-    cmd /c "docker info >nul 2>&1"
-    if ($LASTEXITCODE -eq 0) { $dockerOk = $true }
-
-    if (-not $dockerOk) {
-        if ($DockerExe -and (Test-Path $DockerExe)) {
-            Write-Host "[..] 启动 Docker Desktop（首次冷启动约 30-90s）..."
-            Start-Process $DockerExe -WindowStyle Hidden
-            for ($i = 0; $i -lt 90; $i += 3) {
-                Start-Sleep -Seconds 3
-                cmd /c "docker info >nul 2>&1"
-                if ($LASTEXITCODE -eq 0) { $dockerOk = $true; break }
-            }
-        } else {
-            Write-Host "[FAIL] 未找到 Docker Desktop，请确认已安装（或手动启动后重跑本脚本）"
-        }
+    # ---------- 1. 数据库迁移 + 初始数据（幂等，SQLite 单文件）----------
+    Push-Location $Backend
+    try {
+        Write-Host "== 1/2 数据库（SQLite）=="
+        Write-Host "[..] Alembic upgrade head..."
+        & $PyExe -m alembic upgrade head
+        if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] 数据库迁移失败"; return }
+        Write-Host "[..] 写入首批公司与技能字典..."
+        & $PyExe -m app.workers.collect_cli seed
+        if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] 初始数据写入失败"; return }
+        Write-Host "[OK] 数据库结构与初始数据已就绪 (backend/dev.db)"
+    } finally {
+        Pop-Location
     }
-    if (-not $dockerOk) { Write-Host "[FAIL] Docker 引擎不可用，无法启动数据库"; return }
-    Write-Host "[OK] Docker 引擎在线"
 
-    # ---------- 2. PG / Redis 容器 ----------
-    Write-Host "== 2/3 数据库容器（PG + Redis）=="
-    cmd /c "cd /d `"$Backend`" && docker compose up -d >nul 2>&1"
-    $dbCid = (cmd /c "cd /d `"$Backend`" && docker compose ps -q db 2>nul") -join ""
-
-    if ($dbCid) {
-        $st = ""
-        for ($i = 0; $i -lt 60; $i += 3) {
-            $st = (cmd /c "docker inspect -f {{.State.Health.Status}} $dbCid 2>nul") -join ""
-            if ($st -eq "healthy") { break }
-            Start-Sleep -Seconds 3
-        }
-        if ($st -eq "healthy") { Write-Host "[OK] PG healthy" }
-        else { Write-Host "[FAIL] PG 未 healthy（当前: $st）"; return }
-    } else {
-        Write-Host "[FAIL] 未找到 db 容器（docker compose ps -q db 为空）"; return
-    }
-    if (Test-Port 6379) { Write-Host "[OK] Redis 6379 在线" }
-    else { Write-Host "[FAIL] Redis 6379 未监听"; return }
-
-    # ---------- 3a. 后端 uvicorn :8001（8000 让给 stellar-mall）----------
-    Write-Host "== 3/3 后端 + 前端 =="
+    # ---------- 2a. 后端 uvicorn :8001（8000 让给 stellar-mall）----------
+    Write-Host "== 2/2 后端 + 前端 =="
     $backendState = Test-Backend
     if ($backendState -eq "ours") {
         Write-Host "[SKIP] 后端已在运行 (port 8001)"
@@ -194,7 +154,7 @@ function Main {
         else { Write-Host "[FAIL] 后端启动失败，日志: $LogDir\uvicorn.log"; return }
     }
 
-    # ---------- 3b. 前端 Next.js :3000 ----------
+    # ---------- 2b. 前端 Next.js :3000 ----------
     if (Test-Port 3000) {
         Write-Host "[SKIP] 前端已在运行 (port 3000)"
     } else {

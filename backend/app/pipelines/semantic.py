@@ -2,7 +2,7 @@
 
 为什么不直接上 PGVector（开发文档 §7 二期）：
 - 现状 SQLite + 3470 条职位，千级语料 TF-IDF 毫秒级；
-- 不需要 docker PG / embedding 模型 / torch，离线可测；
+- 不需要独立 PG / embedding 模型 / torch，离线可测；
 - 中文不引分词器，用 CJK 2-gram + ASCII 单词混合 token（n-gram 是 ES
   同款思路），对"后端开发工程师 vs 服务端开发"这类字面重叠足够敏感。
 

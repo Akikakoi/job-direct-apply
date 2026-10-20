@@ -74,14 +74,46 @@ def test_sqlite_and_disabled_redis_warn_only():
     assert report["counts"]["fail"] == 0
 
 
+def test_hosted_localhost_infrastructure_warns():
+    report = audit_config(
+        {
+            "deployment_profile": "hosted",
+            "database_url": "postgresql+psycopg2://jda:secret@localhost:5432/jda",
+            "redis_url": "redis://localhost:6379/0",
+        }
+    )
+    assert {"database_localhost_in_production", "redis_localhost_in_production"} <= _codes(report)
+    assert report["counts"]["fail"] == 0
+
+
+def test_local_profile_allows_localhost():
+    report = audit_config(
+        {
+            "deployment_profile": "local",
+            "database_url": "postgresql+psycopg2://jda:jda@localhost:5432/jda",
+            "redis_url": "redis://localhost:6379/0",
+        }
+    )
+    assert "database_localhost_in_production" not in _codes(report)
+    assert "redis_localhost_in_production" not in _codes(report)
+
+
 # ---------- 密钥 ----------
 
 
-def test_empty_secrets_are_not_failures():
-    """留空 = 该功能未启用，不是配置错误（否则没配 OCR 就上不了线）。"""
-    report = audit_config({field: "" for field in SECRET_FIELDS})
+def test_optional_empty_secrets_are_not_failures():
+    """除 AUTH_SECRET 外，留空 = 该功能未启用，不是配置错误。"""
+    fields = (field for field in SECRET_FIELDS if field != "auth_secret")
+    report = audit_config({field: "" for field in fields})
     assert report["counts"]["fail"] == 0
     assert not {c for c in _codes(report) if c.endswith(tuple(SECRET_FIELDS))}
+
+
+def test_empty_auth_secret_fails():
+    """JWT 签名密钥不能缺失：空密钥同样可被用来伪造任意用户令牌。"""
+    report = audit_config({"auth_secret": ""})
+    assert report["status"] == "fail"
+    assert "auth_secret_missing" in _codes(report)
 
 
 def test_placeholder_secret_fails():
@@ -125,6 +157,11 @@ def test_default_ua_contact_warns():
     """Settings 默认 UA 里的示例邮箱是上线前必须替换的一项。"""
     report = audit_config({"ua": Settings().ua})
     assert "default_ua_contact" in _codes(report)
+
+
+def test_ua_without_contact_warns():
+    report = audit_config({"ua": "job-direct-apply-bot/1.0 (compliant)"})
+    assert "ua_contact_missing" in _codes(report)
 
 
 def test_auth_required_off_warns():
@@ -180,6 +217,8 @@ def test_repo_gitignore_excludes_env_file():
     text = GITIGNORE.read_text(encoding="utf-8")
     ignored = {line.strip() for line in text.splitlines()}
     assert "backend/.env" in ignored and ".env" in ignored
+    assert "backend/.env.production" in ignored
+    assert "!backend/.env.production.example" in ignored
 
 
 def test_rotation_checklist_covers_key_and_infra_secrets():

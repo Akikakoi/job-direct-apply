@@ -1,15 +1,15 @@
 """Celery 应用 + beat 定时调度（P1 收尾项）。
 
 设计对应开发文档 §2/§5/§9：
-- broker/backend：settings.redis_url（默认 redis://localhost:6379/0，
-  与 docker-compose.yml 暴露的 Redis 一致）；
+- broker/backend：settings.redis_url（REDIS_URL 留空 = 不启用后台任务，
+  本地默认如此；需要时配任意 Redis 实例再起 worker/beat）；
 - beat 每 30 分钟 tick 一次 collect_jobs_task；collect_all 内部有公司级
   interval_min 间隔守卫，未到期的公司自动 skip，因此高频 tick 安全；
 - §9 其余三项：idle_jobs_cleanup_task（每日 03:00 全局 TTL 下架）、
   resume_parse_task / run_match_task（按 resume_id 异步解析与重算，由 API 侧
   settings.resume_parse_async / match_async 开关投递，投递失败自动降级为请求内同步）；
 - SQLite/无 Redis 环境下 worker/beat 无法运行，属预期（开发期用
-  collect_cli.py 手动触发，生产/联调用 docker-compose 起 Redis）。
+  collect_cli.py 手动触发；需要定时任务时配好 REDIS_URL 再起）。
 
 启动：
     celery -A app.workers.celery_app worker --loglevel=info

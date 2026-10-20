@@ -5,8 +5,8 @@
 好处是单测不必改本机 `.env`，也不会因为本机配了真 key 而误判。
 
 分级（fail 阻断上线 / warn 需人工确认 / info 仅告知）：
-- fail：密钥为占位或过短、声明了 SMTP/IM 却缺必填项、`.env` 被 git 跟踪；
-- warn：仍在 SQLite、未启用 Redis、采集 UA 还留着默认示例邮箱、SMTP 缺收发件人、未开启 AUTH_REQUIRED、简历原件未加密（UPLOADS_KEY 为空）；
+- fail：AUTH_SECRET 缺失、密钥为占位或过短、声明了 SMTP/IM 却缺必填项、`.env` 被 git 跟踪；
+- warn：SQLite、云部署仍指向 localhost、未启用 Redis、采集 UA 缺真实联系地址、SMTP 缺收发件人、未开启 AUTH_REQUIRED、简历原件未加密（UPLOADS_KEY 为空）；
 - info：密钥轮换清单（人工在服务商侧操作，代码只能列清单与判长度）。
 
 **密钥值本身绝不打印、绝不入库**：本模块只判长度/命中占位词，不返回原文。
@@ -69,12 +69,24 @@ def _looks_placeholder(value: str) -> bool:
 
 
 def _secret_checks(config) -> list[dict]:
-    """已填写的密钥判长度与占位词；**未填的密钥不算 fail**（功能开关本就允许留空）。"""
+    """校验密钥：AUTH_SECRET 缺失即 fail；其余已填写密钥判长度与占位词。"""
     checks: list[dict] = []
     for field in SECRET_FIELDS:
-        value = _text(_value(config, field))
+        raw = _value(config, field)
+        if raw is None and isinstance(config, dict) and field not in config:
+            continue  # 部分配置字典：缺项沿用默认值，不能误判为显式空值
+        value = _text(raw)
         if not value:
-            continue  # 留空 = 该功能未启用，不是配置错误
+            if field == "auth_secret":
+                # 鉴权接口始终存在；空签名密钥等于任何人都能伪造令牌，不能用"功能未启用"豁免。
+                checks.append(
+                    {
+                        "level": "fail",
+                        "code": "auth_secret_missing",
+                        "message": "AUTH_SECRET 为空，生产必须配置至少 16 位的随机签名密钥",
+                    }
+                )
+            continue  # 其余密钥留空 = 该项功能未启用，不是配置错误
         if _looks_placeholder(value):
             checks.append(
                 {
@@ -130,6 +142,8 @@ def _notify_checks(config) -> list[dict]:
 def _infra_checks(config) -> list[dict]:
     checks: list[dict] = []
     database_url = _text(_value(config, "database_url"))
+    deployment_profile = (_text(_value(config, "deployment_profile")) or "local").lower()
+    database_lower = database_url.lower()
     if database_url.startswith("sqlite"):
         checks.append(
             {
@@ -138,8 +152,17 @@ def _infra_checks(config) -> list[dict]:
                 "message": f"DATABASE_URL 仍是 SQLite（{database_url}），生产应切 PostgreSQL",
             }
         )
+    elif deployment_profile == "hosted" and ("localhost" in database_lower or "127.0.0.1" in database_lower):
+        checks.append(
+            {
+                "level": "warn",
+                "code": "database_localhost_in_production",
+                "message": "DATABASE_URL 仍指向 localhost/127.0.0.1，生产需改为托管数据库内网地址",
+            }
+        )
 
-    if not _text(_value(config, "redis_url")):
+    redis_url = _text(_value(config, "redis_url"))
+    if not redis_url:
         checks.append(
             {
                 "level": "warn",
@@ -147,13 +170,30 @@ def _infra_checks(config) -> list[dict]:
                 "message": "REDIS_URL 为空：限流退化为 DB 守卫、别名缓存直查 DB，Celery worker/beat 无法运行",
             }
         )
+    elif deployment_profile == "hosted" and ("localhost" in redis_url.lower() or "127.0.0.1" in redis_url.lower()):
+        checks.append(
+            {
+                "level": "warn",
+                "code": "redis_localhost_in_production",
+                "message": "REDIS_URL 仍指向 localhost/127.0.0.1，生产需改为带口令的内网 Redis",
+            }
+        )
 
-    if DEFAULT_UA_MARKER in _text(_value(config, "ua")):
+    ua = _text(_value(config, "ua"))
+    if DEFAULT_UA_MARKER in ua:
         checks.append(
             {
                 "level": "warn",
                 "code": "default_ua_contact",
                 "message": f"采集 UA 仍含默认示例邮箱 {DEFAULT_UA_MARKER}，生产需替换为真实联系地址",
+            }
+        )
+    elif ua and "@" not in ua and "http://" not in ua.lower() and "https://" not in ua.lower():
+        checks.append(
+            {
+                "level": "warn",
+                "code": "ua_contact_missing",
+                "message": "采集 UA 未包含联系邮箱或网址，生产站点可能按匿名爬虫处理",
             }
         )
 

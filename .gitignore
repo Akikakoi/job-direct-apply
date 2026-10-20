@@ -10,3 +10,8 @@ frontend/.next/
 .workbuddy/
 .cowork-temp/
 logs/
+backend/.env.production
+backend/.env.*.local
+!backend/.env.production.example
+backups/
+backend/dev.db.bak*
